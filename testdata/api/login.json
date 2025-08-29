@@ -1,0 +1,5 @@
+{
+  "username": "${env:API_USER}",
+  "password": "${env:API_PASS}",
+  "ts": "${now:iso}"
+}

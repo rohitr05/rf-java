@@ -1,0 +1,53 @@
+# Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+.mvn/wrapper/maven-wrapper.properties
+.mvn/wrapper/MavenWrapperDownloader.java
+
+# Build reports & temp artifacts
+surefire-reports/
+failsafe-reports/
+allure-results/
+allure-report/
+reports/
+logs/
+*.log
+
+# Robot Framework caches/reports
+output.xml
+report.html
+log.html
+*.robot.xml
+*.tsv
+*.rbt.xml
+*.rfstream
+*.db
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+bin/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Environment / secrets (commit sample files instead)
+.env
+.env.*
+*.local
+application.secret.conf
+*.keystore
+
+# Java / compiled
+*.class
+
+# Zips & binaries
+*.zip
+*.jar
+*.war
+*.ear
