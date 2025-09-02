@@ -49,33 +49,49 @@ pipeline {
         powershell '''
           New-Item -ItemType Directory -Force -Path "$env:WORKSPACE/$env:ALLURE_RESULTS" | Out-Null
           New-Item -ItemType Directory -Force -Path "$env:WORKSPACE/$env:ROBOT_RESULTS"  | Out-Null
+          $workspace = $env:WORKSPACE
+          $targetDir = Join-Path $workspace "server\\target"
+		  
+          # Prefer shaded JAR if present, otherwise the newest jar
+          $jar = Get-ChildItem -Path $targetDir -Filter "rf-keywords-rbc-1.0.0.jar","*.jar" |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
-          $jar = Join-Path $env:WORKSPACE "server\\target\\rf-keywords-rbc-1.0.0.jar"
-          if (!(Test-Path $jar)) { throw "Shaded jar not found: $jar" }
+          if (-not $jar) { throw "Shaded JAR not found under $targetDir" }
 
-          $log     = Join-Path $env:WORKSPACE "keywordserver.log"
-          $pidFile = Join-Path $env:WORKSPACE "keywordserver.pid"
-
-          Write-Host "Starting KeywordServer: $jar on $env:RF_HOST:$env:RF_PORT"
+          $stdout = Join-Path $targetDir "keywordserver.out.log"
+          $stderr = Join-Path $targetDir "keywordserver.err.log"
 
           $java = (Get-Command java).Source
-          $args = @('-jar', "`"$jar`"")   # Do not pass extra args; server reads env vars.
+          $args = "-Drf.port=$env:RF_PORT -Drf.host=$env:RF_HOST -jar `"$($jar.FullName)`""
 
-          $p = Start-Process -FilePath $java -ArgumentList $args -WorkingDirectory $env:WORKSPACE `
-                -PassThru -RedirectStandardOutput $log -RedirectStandardError $log
+          Write-Host "Starting KeywordServer: $($jar.FullName) on $($env:RF_PORT) (bind $($env:RF_HOST))"
 
-          $ksPid = $p.Id
-          "$ksPid" | Set-Content -Path $pidFile -Encoding ascii
+          # keep your Start-Process model; just ensure separate stdout/stderr
+          $p = Start-Process -FilePath $java `
+              -ArgumentList $args `
+              -WorkingDirectory $targetDir `
+              -WindowStyle Hidden `
+              -RedirectStandardOutput $stdout `
+              -RedirectStandardError  $stderr `
+              -PassThru
 
-          # Wait for port to open (90s max)
+          # *** ONLY CHANGE MADE ***
+          # Probe localhost instead of 0.0.0.0 (non-routable)
           $deadline = (Get-Date).AddSeconds(90)
+          $ok = $false
           do {
             Start-Sleep -Seconds 2
-            $ok = Test-NetConnection -ComputerName 127.0.0.1 -Port ([int]$env:RF_PORT) -InformationLevel Quiet
-          } until ($ok -or (Get-Date) -ge $deadline)
+            $ok = Test-NetConnection -ComputerName 127.0.0.1 -Port $env:RF_PORT -InformationLevel Quiet
+          } until ($ok -or (Get-Date) -gt $deadline)
 
-          if (-not $ok) { throw "KeywordServer not ready on port $env:RF_PORT" }
-          Write-Host "KeywordServer ready (PID=$ksPid)"
+          if (-not $ok) {
+            Write-Warning "KeywordServer not ready on port $($env:RF_PORT). Recent stdout/stderr follow."
+            if (Test-Path $stdout) { Get-Content $stdout -Tail 80 | Write-Host }
+            if (Test-Path $stderr) { Get-Content $stderr -Tail 80 | Write-Host }
+            throw "KeywordServer not ready on port $($env:RF_PORT)"
+          }
+
+          Write-Host "KeywordServer is accepting connections on 127.0.0.1:$($env:RF_PORT)"
         '''
       }
     }
