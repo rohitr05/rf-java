@@ -3,154 +3,127 @@ pipeline {
 
   options {
     timestamps()
-    skipDefaultCheckout(true)
+    ansiColor('xterm')
+    buildDiscarder(logRotator(numToKeepStr: '20'))
   }
 
   parameters {
-    choice(name: 'ENV', choices: ['dev', 'qa', 'sit', 'uat', 'prod'], description: 'Target environment')
-    string(name: 'RF_HOST_OVERRIDE', defaultValue: '', description: 'Optional override for RF_HOST')
-    string(name: 'RF_PORT_OVERRIDE', defaultValue: '', description: 'Optional override for RF_PORT')
-    string(name: 'BASE_OVERRIDE',    defaultValue: '', description: 'Optional override for BASE URL')
-    string(name: 'PABOT_PROCESSES',  defaultValue: '4', description: 'Number of pabot processes')
+    choice(name: 'ENV', choices: ['dev','qa','uat','prod'], description: 'Target environment')
+    string(name: 'PABOT_PROCESSES', defaultValue: '4', description: 'Parallel workers for pabot')
   }
 
-  // Defaults (POSIX-style subpaths for tools)
   environment {
+    // Safe defaults; can be overridden per-ENV in the Init stage
     RF_HOST = '0.0.0.0'
     RF_PORT = '8270'
     BASE    = 'https://httpbin.org'
-
     ALLURE_RESULTS = 'results/allure'
     ROBOT_RESULTS  = 'results/robot'
   }
 
   stages {
+
     stage('Checkout') {
-      steps {
-        ansiColor('xterm') {
-          checkout scm
-        }
-      }
+      steps { checkout scm }
     }
 
     stage('Init Environment') {
       steps {
-        ansiColor('xterm') {
-          script {
-            // Minimal per-env map; adjust BASE for qa/sit/uat/prod when you know them
-            def profiles = [
-              dev : [host:'0.0.0.0', port:'8270', base:'https://httpbin.org'],
-              qa  : [host:'0.0.0.0', port:'8270', base:'https://httpbin.org'],
-              sit : [host:'0.0.0.0', port:'8270', base:'https://httpbin.org'],
-              uat : [host:'0.0.0.0', port:'8270', base:'https://httpbin.org'],
-              prod: [host:'0.0.0.0', port:'8270', base:'https://httpbin.org'],
-            ]
-
-            def sel = params.ENV?.trim() ?: 'dev'
-            def p   = profiles.get(sel, profiles.dev)
-
-            // Apply overrides only if provided
-            env.RF_HOST = (params.RF_HOST_OVERRIDE?.trim()) ?: p.host
-            env.RF_PORT = (params.RF_PORT_OVERRIDE?.trim()) ?: p.port
-            env.BASE    = (params.BASE_OVERRIDE?.trim())    ?: p.base
-
-            // Re-assert results dirs (forward slashes)
-            env.ALLURE_RESULTS = 'results/allure'
-            env.ROBOT_RESULTS  = 'results/robot'
-
-            echo "Selected ENV: ${sel}"
-            echo "RF_HOST=${env.RF_HOST}, RF_PORT=${env.RF_PORT}"
-            echo "BASE=${env.BASE}"
-            echo "ALLURE_RESULTS=${env.ALLURE_RESULTS}, ROBOT_RESULTS=${env.ROBOT_RESULTS}"
-
-            // Guardrail: fail early if somehow empty (prevents the 'empty port' failure you saw)
-            if (!env.RF_PORT?.trim()) {
-              error("RF_PORT is empty; aborting before server start.")
-            }
+        script {
+          echo "Selected ENV: ${params.ENV}"
+          // You can switch per-environment here if needed
+          switch (params.ENV) {
+            case 'dev':
+              env.RF_HOST = env.RF_HOST ?: '0.0.0.0'
+              env.RF_PORT = env.RF_PORT ?: '8270'
+              env.BASE    = env.BASE    ?: 'https://httpbin.org'
+              break
+            case 'qa':
+              // env.RF_HOST = '...'; env.RF_PORT = '...'; env.BASE = '...'
+              break
+            case 'uat':
+              // ...
+              break
+            case 'prod':
+              // ...
+              break
           }
+          echo "RF_HOST=${env.RF_HOST}, RF_PORT=${env.RF_PORT}"
+          echo "BASE=${env.BASE}"
+          echo "ALLURE_RESULTS=${env.ALLURE_RESULTS}, ROBOT_RESULTS=${env.ROBOT_RESULTS}"
         }
       }
     }
 
     stage('Build KeywordServer (Maven)') {
       steps {
-        ansiColor('xterm') {
-          bat 'mvn -B -DskipTests package'
-        }
+        // Windows-friendly maven call
+        bat 'mvn -B -DskipTests package'
       }
     }
 
     stage('Start KeywordServer') {
       steps {
-        ansiColor('xterm') {
-          powershell """
-            \$ErrorActionPreference = 'Stop'
-            Set-Location -LiteralPath (Join-Path \$env:WORKSPACE 'server')
+        // Use single-quoted Groovy string so $env: expands in PowerShell (no Groovy interpolation)
+        powershell '''
+          $ErrorActionPreference = "Stop"
 
-            # find shaded jar
-            \$jar = Get-ChildItem -Path (Join-Path (Resolve-Path 'target') '*-shaded.jar') -ErrorAction Stop | Select-Object -First 1
-            if (-not \$jar) { throw 'Shaded jar not found. Ensure maven-shade-plugin is configured.' }
+          $jar = Get-ChildItem -Path "server\\target" -Filter "*-shaded.jar" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $jar) { throw "Shaded jar not found. Ensure maven-shade-plugin produced it." }
 
-            Write-Host "Starting KeywordServer: \$((\$jar).FullName)"
+          Write-Host "Starting KeywordServer: $($jar.FullName)"
+          # Start in background, capture PID
+          $p = Start-Process -FilePath "java" -ArgumentList @("-jar", $jar.FullName, "-h", $env:RF_HOST, "-p", $env:RF_PORT) -PassThru -WindowStyle Hidden
+          $serverPid = $p.Id
+          Set-Content -Path "keywordserver.pid" -Value $serverPid
 
-            # Start server with explicit host/port system properties so it binds correctly
-            \$args = @(
-              '-Dlog4j.configurationFile=log4j2.xml',
-              "-Drf.host=\$env:RF_HOST",
-              "-Drf.port=\$env:RF_PORT",
-              '-jar', \$jar.FullName
-            )
-            \$proc = Start-Process -FilePath 'java' -ArgumentList \$args -NoNewWindow -PassThru
-            \$proc.Id | Out-File -FilePath (Join-Path \$env:WORKSPACE 'keywordserver.pid') -Encoding ascii -Force
+          # Wait until port is listening (max ~60s)
+          $deadline = (Get-Date).AddSeconds(60)
+          do {
+            Start-Sleep -Seconds 2
+            $listening = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+                         Where-Object { $_.LocalPort -eq [int]$env:RF_PORT }
+          } while (-not $listening -and (Get-Date) -lt $deadline)
 
-            # wait until the RF_PORT is open (max ~60s)
-            \$port = [int]\$env:RF_PORT
-            for (\$i=1; \$i -le 60; \$i++) {
-              Start-Sleep -Seconds 1
-              try {
-                if (Test-NetConnection -ComputerName '127.0.0.1' -Port \$port -InformationLevel Quiet) {
-                  Write-Host "KeywordServer is ready on port \$port"
-                  break
-                }
-              } catch { }
-              if (\$i -eq 60) { throw "KeywordServer not ready on port \$env:RF_PORT" }
-            }
-          """
-        }
+          if (-not $listening) {
+            throw "KeywordServer not ready on port $env:RF_PORT"
+          }
+          Write-Host "KeywordServer is ready on port $env:RF_PORT (PID=$serverPid)"
+        '''
       }
     }
 
     stage('Install Python deps') {
       steps {
-        ansiColor('xterm') {
-          bat 'py -3 -m pip install -U pip'
-          bat 'py -3 -m pip install robotframework robotframework-pabot allure-robotframework'
-        }
+        powershell '''
+          $ErrorActionPreference = "Stop"
+          py -3 -m pip install -U pip
+          py -3 -m pip install robotframework robotframework-pabot allure-robotframework
+        '''
       }
     }
 
-    stage('Run tests with pabot (4)') {
+    stage('Run tests with pabot (4) + colored console') {
       steps {
-        ansiColor('xterm') {
+        // We need Groovy interpolation for process count; escape PowerShell $-vars for Groovy
+        script {
+          def procs = params.PABOT_PROCESSES
           powershell """
-            \$ErrorActionPreference = 'Stop'
-            New-Item -ItemType Directory -Force -Path \$env:ALLURE_RESULTS | Out-Null
-            New-Item -ItemType Directory -Force -Path \$env:ROBOT_RESULTS  | Out-Null
-
-            \$sw = [System.Diagnostics.Stopwatch]::StartNew()
+            \$ErrorActionPreference = "Stop"
+            if (Test-Path "${env.ALLURE_RESULTS}") { Remove-Item -Recurse -Force "${env.ALLURE_RESULTS}" }
+            if (Test-Path "${env.ROBOT_RESULTS}")  { Remove-Item -Recurse -Force "${env.ROBOT_RESULTS}"  }
+            New-Item -ItemType Directory -Force -Path "${env.ALLURE_RESULTS}" | Out-Null
+            New-Item -ItemType Directory -Force -Path "${env.ROBOT_RESULTS}"  | Out-Null
 
             py -3 -m pabot `
-              --processes ${PABOT_PROCESSES} `
+              --processes ${procs} `
               --testlevelsplit `
-              --listener "allure_robotframework;\$env:ALLURE_RESULTS" `
-              --variable RF_HOST:\$env:RF_HOST `
-              --variable RF_PORT:\$env:RF_PORT `
-              --variable BASE:\$env:BASE `
-              --outputdir "\$env:ROBOT_RESULTS" `
+              --listener 'allure_robotframework;${env.ALLURE_RESULTS}' `
+              --outputdir ${env.ROBOT_RESULTS} `
+              --variable BASE:${env.BASE} `
+              --variable RF_HOST:${env.RF_HOST} `
+              --variable RF_PORT:${env.RF_PORT} `
               api_smoke.robot sql_demo.robot fix_demo.robot
-
-            \$sw.Stop()
-            Write-Host ("Pabot wall-clock: {0:c}" -f \$sw.Elapsed)
           """
         }
       }
@@ -158,28 +131,29 @@ pipeline {
 
     stage('Publish Allure Report') {
       steps {
-        allure results: [[path: "${ALLURE_RESULTS}"]], reportBuildPolicy: 'ALWAYS'
+        // If you have the Allure Jenkins plugin installed and configured:
+        allure includeProperties: false, jdk: '', results: [[path: "${env.ALLURE_RESULTS}"]]
       }
     }
   }
 
   post {
     always {
-      echo 'Stopping Keyword Server (if running)...'
-      // IMPORTANT: do NOT assign to $PID (read-only); use another variable
-      powershell """
-        \$ErrorActionPreference = 'Continue'
-        \$pidFile = Join-Path \$env:WORKSPACE 'keywordserver.pid'
-        if (Test-Path \$pidFile) {
-          \$serverPid = Get-Content \$pidFile | Select-Object -First 1
-          if (\$serverPid -and (\$serverPid -match '^\\d+$')) {
-            try { Stop-Process -Id [int]\$serverPid -Force -ErrorAction SilentlyContinue } catch { }
+      echo 'Stopping Keyword Server (if running).'
+      // Single-quoted to allow $env and our own $serverPid var reading from file
+      powershell '''
+        $ErrorActionPreference = "Continue"
+        if (Test-Path "keywordserver.pid") {
+          $serverPid = (Get-Content "keywordserver.pid" | Select-Object -First 1)
+          if ($serverPid -and (Get-Process -Id $serverPid -ErrorAction SilentlyContinue)) {
+            Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue
+            Write-Host "Stopped KeywordServer PID=$serverPid"
           }
-          Remove-Item \$pidFile -ErrorAction SilentlyContinue
+          Remove-Item "keywordserver.pid" -Force -ErrorAction SilentlyContinue
         }
-      """
-      archiveArtifacts artifacts: 'server/target/*-shaded.jar, results/robot/**, results/allure/**', fingerprint: true
-      junit allowEmptyResults: true, testResults: 'results/robot/*.xml'
+      '''
+      // Archive Robot outputs for retention
+      archiveArtifacts artifacts: "${env.ROBOT_RESULTS}/**", allowEmptyArchive: true
     }
   }
 }
