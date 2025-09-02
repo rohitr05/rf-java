@@ -71,7 +71,7 @@ pipeline {
           $deadline = (Get-Date).AddSeconds(90)
           do {
             Start-Sleep -Seconds 2
-            $ok = Test-NetConnection -ComputerName $env:RF_HOST -Port ([int]$env:RF_PORT) -InformationLevel Quiet
+            $ok = Test-NetConnection -ComputerName 127.0.0.1 -Port ([int]$env:RF_PORT) -InformationLevel Quiet
           } until ($ok -or (Get-Date) -ge $deadline)
 
           if (-not $ok) { throw "KeywordServer not ready on port $env:RF_PORT" }
