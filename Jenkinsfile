@@ -64,16 +64,16 @@ pipeline {
 
           Write-Host "Starting KeywordServer: $($jar.FullName) on $($env:RF_PORT) (bind $($env:RF_HOST))"
 
-          # Start detached and capture PID for cleanup
+          # NOTE: Do NOT combine -NoNewWindow with -WindowStyle; they are mutually exclusive
           $p = Start-Process -FilePath $java `
               -ArgumentList $args `
               -WorkingDirectory $targetDir `
-              -NoNewWindow `
               -WindowStyle Hidden `
               -RedirectStandardOutput $stdout `
               -RedirectStandardError  $stderr `
               -PassThru
 
+          # Save PID for cleanup
           Set-Content -Path $pidFile -Value $p.Id
 
           # Probe localhost (127.0.0.1), not 0.0.0.0
