@@ -17,16 +17,14 @@ pipeline {
     PY_HOME = "${params.PY_HOME}"
     PYTHON_EXE = "${env.PY_HOME}\\python.exe"
 
-    // POSIX-style for tools that prefer forward slashes
+    // POSIX-style (kept as in your original)
     ALLURE_RESULTS = 'results/allure'
     ROBOT_RESULTS  = 'results/robot'
 
     JAVA_TOOL_OPTIONS = '-Dfile.encoding=UTF-8'
   }
 
-  options {
-    timestamps()
-  }
+  options { timestamps() }
 
   stages {
 
@@ -63,13 +61,12 @@ pipeline {
           $cmdArgs = '/c start "RF KeywordServer" /B java -Drf.port={0} -Drf.host={1} -jar "{2}" 1>"{3}" 2>"{4}"' -f $env:RF_PORT, $env:RF_HOST, $jar.FullName, $stdout, $stderr
           Start-Process -FilePath $cmd -ArgumentList $cmdArgs -WorkingDirectory $targetDir
 
-          # Try to capture PID by matching commandline (jar name + port). Don't fail the stage if this lookup fails.
+          # Try to capture PID by matching commandline (jar name + port). Non-fatal if lookup fails.
           Start-Sleep -Seconds 2
           try {
             $javaProcs = Get-CimInstance -ClassName Win32_Process -Filter "Name='java.exe'" -ErrorAction Stop |
                          Select-Object ProcessId, CommandLine
           } catch {
-            # Fallback for older shells
             $javaProcs = Get-WmiObject -Class Win32_Process -Filter "Name='java.exe'" |
                          Select-Object ProcessId, CommandLine
           }
@@ -105,42 +102,13 @@ pipeline {
 
     stage('Run Robot (pabot)') {
       steps {
-        bat """
-          @echo off
-          setlocal ENABLEDELAYEDEXPANSION
-
-          rem --- Verify Python from configured PY_HOME ---
-          set "PY_EXE=${env.PYTHON_EXE}"
-          if not exist "%PY_EXE%" (
-            echo ERROR: Python not found at "%PY_EXE%"
-            echo Set PY_HOME parameter correctly (current: ${env.PY_HOME})
-            exit /b 1
-          )
-          echo Using Python: "%PY_EXE%"
-
-          rem --- Upgrade pip and install test deps ---
-          "%PY_EXE%" -m pip install -U pip
-          if errorlevel 1 exit /b 1
-
-          "%PY_EXE%" -m pip install robotframework robotframework-pabot allure-robotframework
-          if errorlevel 1 exit /b 1
-
-          rem --- Normalize result directories to Windows paths ---
-          set "ALLURE_DIR=%ALLURE_RESULTS:/=\\%"
-          set "ROBOT_DIR=%ROBOT_RESULTS:/=\\%"
-
-          if not exist "!ALLURE_DIR!" mkdir "!ALLURE_DIR!"
-          if not exist "!ROBOT_DIR!"  mkdir "!ROBOT_DIR!"
-
-          rem --- Run tests in parallel with pabot ---
-          "%PY_EXE%" -m pabot --processes ${params.PROCESSES} --testlevelsplit ^
-            --listener "allure_robotframework;!ALLURE_DIR!" ^
-            --outputdir "!ROBOT_DIR!" ^
-            api_smoke.robot sql_demo.robot fix_demo.robot
-          if errorlevel 1 exit /b 1
-
-          endlocal
-        """
+        // Clear, one-line commands so failures are obvious in the log
+        bat 'if not exist "%PYTHON_EXE%" ( echo ERROR: Python not found at "%PYTHON_EXE%" & exit /b 1 )'
+        bat '"%PYTHON_EXE%" -m pip install -U pip'
+        bat '"%PYTHON_EXE%" -m pip install robotframework robotframework-pabot allure-robotframework'
+        bat 'if not exist "%ALLURE_RESULTS%" mkdir "%ALLURE_RESULTS%"'
+        bat 'if not exist "%ROBOT_RESULTS%"  mkdir "%ROBOT_RESULTS%"'
+        bat '"%PYTHON_EXE%" -m pabot --processes ${params.PROCESSES} --testlevelsplit --listener "allure_robotframework;%ALLURE_RESULTS%" --outputdir "%ROBOT_RESULTS%" api_smoke.robot sql_demo.robot fix_demo.robot'
       }
     }
 
@@ -154,6 +122,7 @@ pipeline {
   post {
     always {
       archiveArtifacts artifacts: 'server/target/*.jar, server/target/keywordserver.*.log, results/**', fingerprint: true
+      // Note: Robot's output.xml is not JUnit format; leaving as-is to match your existing setup.
       junit allowEmptyResults: true, testResults: "${env.ROBOT_RESULTS}/output.xml"
 
       // Clean shutdown of KeywordServer (if started)
@@ -165,7 +134,6 @@ pipeline {
             if ($pid) { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue }
           } catch { }
         } else {
-          # Best-effort cleanup by matching jar+port in command line
           try {
             $targetJar = (Get-ChildItem -Path (Join-Path $env:WORKSPACE "server\\target") -Filter "*.jar" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
             if ($targetJar) {
