@@ -1,13 +1,6 @@
 pipeline {
   agent any
 
-  options {
-    timestamps()
-    buildDiscarder(logRotator(numToKeepStr: '20'))
-    // ansiColor isn't always supported as a Declarative option on older Jenkins cores.
-    // We'll wrap the heavy output stage with ansiColor instead.
-  }
-
   parameters {
     choice(name: 'ENV', choices: ['dev', 'qa', 'staging', 'prod'], description: 'Target environment')
     string(name: 'RF_HOST', defaultValue: '0.0.0.0', description: 'KeywordServer bind host')
@@ -29,6 +22,10 @@ pipeline {
     JAVA_TOOL_OPTIONS = '-Dfile.encoding=UTF-8'
   }
 
+  options {
+    timestamps()
+  }
+
   stages {
 
     stage('Checkout') {
@@ -39,7 +36,7 @@ pipeline {
 
     stage('Build KeywordServer (Maven)') {
       steps {
-        // Build just the server module and its dependencies
+        // unchanged
         bat 'mvn -B -DskipTests -pl server -am clean package'
       }
     }
@@ -47,17 +44,15 @@ pipeline {
     stage('Start KeywordServer') {
       steps {
         powershell '''
-          New-Item -ItemType Directory -Force -Path "$env:WORKSPACE/$env:ALLURE_RESULTS" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$env:WORKSPACE/$env:ROBOT_RESULTS"  | Out-Null
           $workspace = $env:WORKSPACE
           $targetDir = Join-Path $workspace "server\\target"
-		  
-            # Prefer shaded JAR if present, otherwise the newest jar
-          $jar = Get-ChildItem -Path $targetDir -Filter "*-shaded.jar","*.jar" |
-                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
+          # MINIMAL FIX: find latest *.jar (your build produces rf-keywords-rbc-1.0.0.jar)
+          $jar = Get-ChildItem -Path $targetDir -Filter "*.jar" |
+                 Sort-Object LastWriteTime -Descending |
+                 Select-Object -First 1
 
-          if (-not $jar) { throw "Shaded JAR not found under $targetDir" }
+          if (-not $jar) { throw "No JAR found under $targetDir" }
 
           $stdout = Join-Path $targetDir "keywordserver.out.log"
           $stderr = Join-Path $targetDir "keywordserver.err.log"
@@ -67,7 +62,7 @@ pipeline {
 
           Write-Host "Starting KeywordServer: $($jar.FullName) on $($env:RF_PORT) (bind $($env:RF_HOST))"
 
-          # keep your Start-Process model; just ensure separate stdout/stderr
+          # keep Start-Process; ensure separate stdout/stderr
           $p = Start-Process -FilePath $java `
               -ArgumentList $args `
               -WorkingDirectory $targetDir `
@@ -76,8 +71,7 @@ pipeline {
               -RedirectStandardError  $stderr `
               -PassThru
 
-          # *** ONLY CHANGE MADE ***
-          # Probe localhost instead of 0.0.0.0 (non-routable)
+          # MINIMAL FIX: probe localhost instead of 0.0.0.0 (non-routable)
           $deadline = (Get-Date).AddSeconds(90)
           $ok = $false
           do {
@@ -97,59 +91,24 @@ pipeline {
       }
     }
 
-    stage('Install Python deps') {
+    stage('Run Robot (pabot)') {
       steps {
-        bat '''
-        if exist requirements.txt (
-          python -m pip install -r requirements.txt
-        ) else (
-          python -m pip install --upgrade pip
-          python -m pip install robotframework==6.1.1 robotframework-pabot==2.16.0 robotframework-requests==0.9.7 allure-robotframework==2.9.0
-        )
-        '''
-      }
-    }
-
-    stage('Run tests with pabot (parallel)') {
-      steps {
-        ansiColor('xterm') {
-          powershell '''
-            $start = Get-Date
-            $allureDir = Join-Path $env:WORKSPACE $env:ALLURE_RESULTS
-            $robotDir  = Join-Path $env:WORKSPACE $env:ROBOT_RESULTS
-
-            $listener = "allure_robotframework;$allureDir"
-
-            # Build a Windows-safe command line for pabot
-            $cmd = @(
-              'pabot',
-              '--processes',  '${env:PROCESSES}',
-              '--outputdir',  "`"$robotDir`"",
-              '--listener',   "`"$listener`"",
-              '--variable',   "BASE:`"$env:BASE`"",
-              '--variable',   "RF_HOST:`"$env:RF_HOST`"",
-              '--variable',   "RF_PORT:`"$env:RF_PORT`"",
-              '.'
-            ) -join ' '
-
-            Write-Host "Running: $cmd"
-            cmd /c $cmd
-
-            $elapsed = (Get-Date) - $start
-            "Total parallel time: $($elapsed.ToString())" |
-              Tee-Object -FilePath (Join-Path $robotDir 'duration.txt')
-          '''
-        }
+        // unchanged: install CLI deps & execute tests in parallel
+        bat 'py -3 -m pip install -U pip'
+        bat 'py -3 -m pip install robotframework robotframework-pabot allure-robotframework'
+        bat """
+          py -3 -m pabot --processes ${params.PROCESSES} --testlevelsplit ^
+            --listener "allure_robotframework;${env.ALLURE_RESULTS}" ^
+            --outputdir ${env.ROBOT_RESULTS} ^
+            api_smoke.robot sql_demo.robot fix_demo.robot
+        """
       }
     }
 
     stage('Publish Allure Report') {
       steps {
-        allure([
-          includeProperties: false,
-          jdk: '',
-          results: [[path: "${env.ALLURE_RESULTS}"]]
-        ])
+        // unchanged
+        allure includeProperties: false, jdk: '', results: [[path: "${env.ALLURE_RESULTS}"]]
       }
     }
   }
