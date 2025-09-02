@@ -1,17 +1,21 @@
-// Jenkinsfile (Windows, with AnsiColor + colored Robot console)
+// Jenkinsfile (Windows-native: AnsiColor + KeywordServer + pabot + Allure)
 pipeline {
   agent any
+
   options {
     timestamps()
-    ansiColor('xterm')                    
+    ansiColor('xterm')                    // pretty colors in Jenkins console
     buildDiscarder(logRotator(numToKeepStr: '20'))
   }
+
   environment {
     RF_HOST = '0.0.0.0'
     RF_PORT = '8270'
     BASE    = 'https://httpbin.org'
-    ALLURE_RESULTS_POSIX = 'results/allure'
-    ROBOT_RESULTS_POSIX  = 'results/robot'
+
+    // POSIX-style for listeners/tools that prefer forward slashes
+    ALLURE_RESULTS = 'results/allure'
+    ROBOT_RESULTS  = 'results/robot'
   }
 
   stages {
@@ -29,19 +33,22 @@ pipeline {
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path results | Out-Null
 
+          # Find shaded jar created by server/pom.xml (main = com.example.rf.KeywordServer)
           $jar = Get-ChildItem -Recurse -Filter *-shaded.jar | Select-Object -First 1
-          if (-not $jar) { throw "Shaded jar not found. Ensure maven-shade-plugin is configured." }
+          if (-not $jar) { throw "Shaded jar not found. Check Maven Shade plugin config." }
           Write-Host "Using JAR: $($jar.FullName)"
 
+          # Start server in background and store PID
           $args = "-Drf.port=$env:RF_PORT -Drf.host=$env:RF_HOST -jar `"$($jar.FullName)`""
           $p = Start-Process -FilePath "java" -ArgumentList $args -PassThru -WindowStyle Hidden
           $p.Id | Out-File -FilePath "keywordserver.pid" -Encoding ascii
 
+          # Wait up to 40s for /rest readiness
           $ready = $false
           for ($i=0; $i -lt 40; $i++) {
             try {
-              $resp = Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:{0}/rest" -f $env:RF_PORT) -TimeoutSec 2
-              if ($resp.StatusCode -eq 200) { $ready = $true; break }
+              $r = Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:{0}/rest" -f $env:RF_PORT) -TimeoutSec 2
+              if ($r.StatusCode -eq 200) { $ready = $true; break }
             } catch { }
             Start-Sleep -Seconds 1
           }
@@ -68,31 +75,26 @@ pipeline {
       }
     }
 
-    stage('Run tests with pabot (4) + colored console') {
+    stage('Run tests with pabot (4) — colored console') {
       steps {
         powershell '''
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path $env:ALLURE_RESULTS_POSIX | Out-Null
-          New-Item -ItemType Directory -Force -Path $env:ROBOT_RESULTS_POSIX  | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:ALLURE_RESULTS | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:ROBOT_RESULTS  | Out-Null
 
           $start = Get-Date
           $pabotArgs = @(
             "--processes","4",
             "--testlevelsplit",
-            // enable Robot colored console output
             "--consolecolors","on",
             "--consolemarkers","on",
-            "--listener","allure_robotframework;$env:ALLURE_RESULTS_POSIX",
-            "--outputdir","$env:ROBOT_RESULTS_POSIX",
+            "--listener","allure_robotframework;$env:ALLURE_RESULTS",
+            "--outputdir","$env:ROBOT_RESULTS",
             "--variable","BASE:$env:BASE",
             "api_smoke.robot","sql_demo.robot","fix_demo.robot"
           )
 
-          if (Get-Command py -ErrorAction SilentlyContinue) {
-            py -3 -m pabot $pabotArgs
-          } else {
-            pabot $pabotArgs
-          }
+          if (Get-Command py -ErrorAction SilentlyContinue) { py -3 -m pabot $pabotArgs } else { pabot $pabotArgs }
 
           $elapsed = [int]((Get-Date) - $start).TotalSeconds
           "ELAPSED_SECONDS=$elapsed" | Out-File -FilePath "results\\time.txt" -Encoding ascii
@@ -106,11 +108,13 @@ pipeline {
       }
     }
 
-     stage('Publish Allure Report') {
-       steps {
-         allure includeProperties: false, jdk: '', results: [[path: "${ALLURE_RESULTS_POSIX}"]]
-       }
-     }
+    stage('Publish Allure Report') {
+      when { expression { return fileExists(env.ALLURE_RESULTS) } }
+      steps {
+        // Enable if the Allure Jenkins plugin is installed
+        allure includeProperties: false, jdk: '', results: [[path: "${ALLURE_RESULTS}"]]
+      }
+    }
   }
 
   post {
