@@ -60,13 +60,12 @@ pipeline {
 
           Write-Host "Starting KeywordServer: $($jar.FullName) on $($env:RF_PORT) (bind $($env:RF_HOST))"
 
-          # ---- LAUNCH FULLY DETACHED via cmd.exe /c start /B ----
-          # Use cmd redirection to write logs to files.
+          # Launch fully detached via cmd start /B and redirect output
           $cmd = "cmd.exe"
           $cmdArgs = '/c start "RF KeywordServer" /B java -Drf.port={0} -Drf.host={1} -jar "{2}" 1>"{3}" 2>"{4}"' -f $env:RF_PORT, $env:RF_HOST, $jar.FullName, $stdout, $stderr
           Start-Process -FilePath $cmd -ArgumentList $cmdArgs -WorkingDirectory $targetDir
 
-          # Give the process a moment to spawn, then capture its PID by command line (jar + port)
+          # Capture PID by matching command line (jar name + port)
           Start-Sleep -Seconds 2
           $javaProcs = Get-CimInstance Win32_Process -Filter "Name='java.exe'" | ForEach-Object {
             [PSCustomObject]@{ Id = $_.ProcessId; Cmd = $_.CommandLine }
@@ -97,20 +96,37 @@ pipeline {
           }
 
           Write-Host "KeywordServer is accepting connections on 127.0.0.1:$($env:RF_PORT)"
-          # PowerShell step ends here (server keeps running)
         '''
       }
     }
 
     stage('Run Robot (pabot)') {
       steps {
-        bat 'py -3 -m pip install -U pip'
-        bat 'py -3 -m pip install robotframework robotframework-pabot allure-robotframework'
+        // Auto-detect Python launcher: prefer "py -3" if available, else use "python"
         bat """
-          py -3 -m pabot --processes ${params.PROCESSES} --testlevelsplit ^
+          @echo off
+          setlocal
+          set "PY=python"
+          where py >nul 2>nul
+          if %ERRORLEVEL%==0 set "PY=py -3"
+
+          %PY% -m pip install -U pip
+          if errorlevel 1 exit /b 1
+
+          %PY% -m pip install robotframework robotframework-pabot allure-robotframework
+          if errorlevel 1 exit /b 1
+
+          rem Ensure result dirs exist (pabot will create, but this is safe)
+          if not exist "${env.ALLURE_RESULTS}" mkdir "${env.ALLURE_RESULTS}"
+          if not exist "${env.ROBOT_RESULTS}"  mkdir "${env.ROBOT_RESULTS}"
+
+          %PY% -m pabot --processes ${params.PROCESSES} --testlevelsplit ^
             --listener "allure_robotframework;${env.ALLURE_RESULTS}" ^
             --outputdir ${env.ROBOT_RESULTS} ^
             api_smoke.robot sql_demo.robot fix_demo.robot
+          if errorlevel 1 exit /b 1
+
+          endlocal
         """
       }
     }
@@ -136,14 +152,14 @@ pipeline {
             if ($pid) { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue }
           } catch { }
         } else {
-          # Best-effort cleanup: stop any java with our jar+port in its command line
+          # Best-effort cleanup by matching jar+port in command line
           try {
-            $target = (Get-ChildItem -Path (Join-Path $env:WORKSPACE "server\\target") -Filter "*.jar" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
-            if ($target) {
+            $targetJar = (Get-ChildItem -Path (Join-Path $env:WORKSPACE "server\\target") -Filter "*.jar" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
+            if ($targetJar) {
               $procs = Get-CimInstance Win32_Process -Filter "Name='java.exe'" | ForEach-Object {
                 [PSCustomObject]@{ Id=$_.ProcessId; Cmd=$_.CommandLine }
               } | Where-Object {
-                $_.Cmd -like "*-Drf.port=$($env:RF_PORT)*" -and $_.Cmd -like "*$target*"
+                $_.Cmd -like "*-Drf.port=$($env:RF_PORT)*" -and $_.Cmd -like "*$targetJar*"
               }
               $procs | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
             }
