@@ -7,6 +7,7 @@ pipeline {
     string(name: 'RF_PORT', defaultValue: '8270', description: 'KeywordServer port')
     string(name: 'BASE',    defaultValue: 'https://httpbin.org', description: 'Base API URL for tests')
     string(name: 'PROCESSES', defaultValue: '4', description: 'pabot parallel processes')
+    string(name: 'PY_HOME', defaultValue: 'C:\\Users\\Anjaly\\AppData\\Local\\Programs\\Python\\Python313', description: 'Python home (folder with python.exe and Scripts)')
   }
 
   environment {
@@ -14,6 +15,8 @@ pipeline {
     RF_HOST = "${params.RF_HOST}"
     RF_PORT = "${params.RF_PORT}"
     BASE    = "${params.BASE}"
+    PY_HOME = "${params.PY_HOME}"
+    PYTHON_EXE = "${env.PY_HOME}\\python.exe"
 
     // POSIX-style for tools that prefer forward slashes
     ALLURE_RESULTS = 'results/allure'
@@ -67,7 +70,7 @@ pipeline {
 
           # Capture PID by matching command line (jar name + port)
           Start-Sleep -Seconds 2
-          $javaProcs = Get-CimInstance Win32_Process -Filter "Name='java.exe'" | ForEach-Object {
+          $javaProcs = Get-CimInstance Win32_Process -Filter "Name=''java.exe''" | ForEach-Object {
             [PSCustomObject]@{ Id = $_.ProcessId; Cmd = $_.CommandLine }
           }
           $match = $javaProcs | Where-Object {
@@ -102,27 +105,37 @@ pipeline {
 
     stage('Run Robot (pabot)') {
       steps {
-        // Auto-detect Python launcher: prefer "py -3" if available, else use "python"
         bat """
           @echo off
-          setlocal
-          set "PY=python"
-          where py >nul 2>nul
-          if %ERRORLEVEL%==0 set "PY=py -3"
+          setlocal ENABLEDELAYEDEXPANSION
 
-          %PY% -m pip install -U pip
+          rem --- Verify Python from configured PY_HOME ---
+          set "PY_EXE=${env.PYTHON_EXE}"
+          if not exist "%PY_EXE%" (
+            echo ERROR: Python not found at "%PY_EXE%"
+            echo Set PY_HOME parameter correctly (current: ${env.PY_HOME})
+            exit /b 1
+          )
+          echo Using Python: "%PY_EXE%"
+
+          rem --- Upgrade pip and install test deps ---
+          "%PY_EXE%" -m pip install -U pip
           if errorlevel 1 exit /b 1
 
-          %PY% -m pip install robotframework robotframework-pabot allure-robotframework
+          "%PY_EXE%" -m pip install robotframework robotframework-pabot allure-robotframework
           if errorlevel 1 exit /b 1
 
-          rem Ensure result dirs exist (pabot will create, but this is safe)
-          if not exist "${env.ALLURE_RESULTS}" mkdir "${env.ALLURE_RESULTS}"
-          if not exist "${env.ROBOT_RESULTS}"  mkdir "${env.ROBOT_RESULTS}"
+          rem --- Normalize result directories to Windows paths ---
+          set "ALLURE_DIR=%ALLURE_RESULTS:/=\\%"
+          set "ROBOT_DIR=%ROBOT_RESULTS:/=\\%"
 
-          %PY% -m pabot --processes ${params.PROCESSES} --testlevelsplit ^
-            --listener "allure_robotframework;${env.ALLURE_RESULTS}" ^
-            --outputdir ${env.ROBOT_RESULTS} ^
+          if not exist "!ALLURE_DIR!" mkdir "!ALLURE_DIR!"
+          if not exist "!ROBOT_DIR!"  mkdir "!ROBOT_DIR!"
+
+          rem --- Run tests in parallel with pabot ---
+          "%PY_EXE%" -m pabot --processes ${params.PROCESSES} --testlevelsplit ^
+            --listener "allure_robotframework;!ALLURE_DIR!" ^
+            --outputdir "!ROBOT_DIR!" ^
             api_smoke.robot sql_demo.robot fix_demo.robot
           if errorlevel 1 exit /b 1
 
@@ -156,7 +169,7 @@ pipeline {
           try {
             $targetJar = (Get-ChildItem -Path (Join-Path $env:WORKSPACE "server\\target") -Filter "*.jar" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
             if ($targetJar) {
-              $procs = Get-CimInstance Win32_Process -Filter "Name='java.exe'" | ForEach-Object {
+              $procs = Get-CimInstance Win32_Process -Filter "Name=''java.exe''" | ForEach-Object {
                 [PSCustomObject]@{ Id=$_.ProcessId; Cmd=$_.CommandLine }
               } | Where-Object {
                 $_.Cmd -like "*-Drf.port=$($env:RF_PORT)*" -and $_.Cmd -like "*$targetJar*"
