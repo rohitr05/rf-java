@@ -5,6 +5,7 @@ pipeline {
     timestamps()
     ansiColor('xterm')
     buildDiscarder(logRotator(numToKeepStr: '20'))
+    skipDefaultCheckout(false)
   }
 
   parameters {
@@ -12,11 +13,12 @@ pipeline {
     string(name: 'PABOT_PROCESSES', defaultValue: '4', description: 'Parallel workers for pabot')
   }
 
+  // Safe defaults; can be overridden later if you want
   environment {
-    // Safe defaults; can be overridden per-ENV in the Init stage
     RF_HOST = '0.0.0.0'
     RF_PORT = '8270'
     BASE    = 'https://httpbin.org'
+    // POSIX-style subpaths for tools
     ALLURE_RESULTS = 'results/allure'
     ROBOT_RESULTS  = 'results/robot'
   }
@@ -24,14 +26,17 @@ pipeline {
   stages {
 
     stage('Checkout') {
-      steps { checkout scm }
+      steps {
+        checkout scm
+      }
     }
 
     stage('Init Environment') {
       steps {
         script {
           echo "Selected ENV: ${params.ENV}"
-          // You can switch per-environment here if needed
+
+          // TODO: If you have different endpoints per env, switch here
           switch (params.ENV) {
             case 'dev':
               env.RF_HOST = env.RF_HOST ?: '0.0.0.0'
@@ -48,6 +53,8 @@ pipeline {
               // ...
               break
           }
+
+          // Echo so we never miss a null again (your previous log showed nulls)
           echo "RF_HOST=${env.RF_HOST}, RF_PORT=${env.RF_PORT}"
           echo "BASE=${env.BASE}"
           echo "ALLURE_RESULTS=${env.ALLURE_RESULTS}, ROBOT_RESULTS=${env.ROBOT_RESULTS}"
@@ -57,27 +64,29 @@ pipeline {
 
     stage('Build KeywordServer (Maven)') {
       steps {
-        // Windows-friendly maven call
         bat 'mvn -B -DskipTests package'
       }
     }
 
     stage('Start KeywordServer') {
       steps {
-        // Use single-quoted Groovy string so $env: expands in PowerShell (no Groovy interpolation)
+        // SINGLE-QUOTED so PowerShell $... stays intact (no Groovy interpolation)
         powershell '''
           $ErrorActionPreference = "Stop"
 
+          # locate shaded jar
           $jar = Get-ChildItem -Path "server\\target" -Filter "*-shaded.jar" -File -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $jar) { throw "Shaded jar not found. Ensure maven-shade-plugin produced it." }
 
           Write-Host "Starting KeywordServer: $($jar.FullName)"
-          # Start in background, capture PID
-          $p = Start-Process -FilePath "java" -ArgumentList @("-jar", $jar.FullName, "-h", $env:RF_HOST, "-p", $env:RF_PORT) -PassThru -WindowStyle Hidden
+
+          # Start the server (adjust args if your server expects -h/-p or system props)
+          $args = @("-jar", $jar.FullName)
+          $p = Start-Process -FilePath "java" -ArgumentList $args -PassThru -WindowStyle Hidden
           $serverPid = $p.Id
           Set-Content -Path "keywordserver.pid" -Value $serverPid
 
-          # Wait until port is listening (max ~60s)
+          # Wait until port is listening (~60s max)
           $deadline = (Get-Date).AddSeconds(60)
           do {
             Start-Sleep -Seconds 2
@@ -103,11 +112,12 @@ pipeline {
       }
     }
 
-    stage('Run tests with pabot (4) + colored console') {
+    stage('Run tests with pabot') {
       steps {
-        // We need Groovy interpolation for process count; escape PowerShell $-vars for Groovy
+        // We need Groovy interpolation for ${params.PABOT_PROCESSES},
+        // so keep double quotes and ESCAPE all PowerShell $ with backslash: \$env:...
         script {
-          def procs = params.PABOT_PROCESSES
+          def procs = params.PABOT_PROCESSES ?: '4'
           powershell """
             \$ErrorActionPreference = "Stop"
             if (Test-Path "${env.ALLURE_RESULTS}") { Remove-Item -Recurse -Force "${env.ALLURE_RESULTS}" }
@@ -131,7 +141,6 @@ pipeline {
 
     stage('Publish Allure Report') {
       steps {
-        // If you have the Allure Jenkins plugin installed and configured:
         allure includeProperties: false, jdk: '', results: [[path: "${env.ALLURE_RESULTS}"]]
       }
     }
@@ -139,8 +148,8 @@ pipeline {
 
   post {
     always {
-      echo 'Stopping Keyword Server (if running).'
-      // Single-quoted to allow $env and our own $serverPid var reading from file
+      echo 'Stopping Keyword Server (if running)...'
+      // SINGLE-QUOTED -> PowerShell $ variables untouched
       powershell '''
         $ErrorActionPreference = "Continue"
         if (Test-Path "keywordserver.pid") {
@@ -152,8 +161,8 @@ pipeline {
           Remove-Item "keywordserver.pid" -Force -ErrorAction SilentlyContinue
         }
       '''
-      // Archive Robot outputs for retention
       archiveArtifacts artifacts: "${env.ROBOT_RESULTS}/**", allowEmptyArchive: true
+      junit allowEmptyResults: true, testResults: "${env.ROBOT_RESULTS}/*.xml"
     }
   }
 }
