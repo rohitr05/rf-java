@@ -1,9 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
+  <!-- Inherit whatever you already had in the parent POM -->
   <parent>
     <groupId>com.example</groupId>
     <artifactId>rf-java-rbc</artifactId>
@@ -14,104 +16,15 @@
   <packaging>jar</packaging>
   <name>rf-keywords-rbc</name>
 
+  <!-- Your existing properties, versions, etc. -->
   <properties>
     <maven.compiler.release>17</maven.compiler.release>
+    <log4j.version>2.20.0</log4j.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-
-    <!-- Centralized versions (unchanged) -->
-    <robot.remote.version>4.1.1</robot.remote.version>
-    <restassured.version>5.5.0</restassured.version>
-    <jsonpath.version>2.9.0</jsonpath.version>
-    <jackson.version>2.17.2</jackson.version>
-    <poi.version>5.2.5</poi.version>
-    <mssql.version>12.8.1.jre11</mssql.version>
-    <dotenv.version>3.0.2</dotenv.version>
-    <typesafe.config.version>1.4.3</typesafe.config.version>
-    <quickfixj.version>2.3.0</quickfixj.version>
-    <hikari.version>5.1.0</hikari.version>
-    <log4j.version>2.23.1</log4j.version>
-    <shade.plugin.version>3.5.3</shade.plugin.version>
-    <resources.plugin.version>3.3.1</resources.plugin.version>
-    <compiler.plugin.version>3.13.0</compiler.plugin.version>
   </properties>
 
   <dependencies>
-    <!-- Robot Framework Java Remote Server -->
-    <dependency>
-      <groupId>org.robotframework</groupId>
-      <artifactId>jrobotremoteserver</artifactId>
-      <version>${robot.remote.version}</version>
-    </dependency>
-
-    <!-- REST Assured -->
-    <dependency>
-      <groupId>io.rest-assured</groupId>
-      <artifactId>rest-assured</artifactId>
-      <version>${restassured.version}</version>
-    </dependency>
-
-    <!-- JSONPath -->
-    <dependency>
-      <groupId>com.jayway.jsonpath</groupId>
-      <artifactId>json-path</artifactId>
-      <version>${jsonpath.version}</version>
-    </dependency>
-
-    <!-- Jackson -->
-    <dependency>
-      <groupId>com.fasterxml.jackson.core</groupId>
-      <artifactId>jackson-databind</artifactId>
-      <version>${jackson.version}</version>
-    </dependency>
-
-    <!-- SQL Server JDBC -->
-    <dependency>
-      <groupId>com.microsoft.sqlserver</groupId>
-      <artifactId>mssql-jdbc</artifactId>
-      <version>${mssql.version}</version>
-    </dependency>
-
-    <!-- Connection pool -->
-    <dependency>
-      <groupId>com.zaxxer</groupId>
-      <artifactId>HikariCP</artifactId>
-      <version>${hikari.version}</version>
-    </dependency>
-
-    <!-- Apache POI -->
-    <dependency>
-      <groupId>org.apache.poi</groupId>
-      <artifactId>poi-ooxml</artifactId>
-      <version>${poi.version}</version>
-    </dependency>
-
-    <!-- .env -->
-    <dependency>
-      <groupId>io.github.cdimascio</groupId>
-      <artifactId>dotenv-java</artifactId>
-      <version>${dotenv.version}</version>
-    </dependency>
-
-    <!-- HOCON -->
-    <dependency>
-      <groupId>com.typesafe</groupId>
-      <artifactId>config</artifactId>
-      <version>${typesafe.config.version}</version>
-    </dependency>
-
-    <!-- FIX -->
-    <dependency>
-      <groupId>org.quickfixj</groupId>
-      <artifactId>quickfixj-all</artifactId>
-      <version>${quickfixj.version}</version>
-    </dependency>
-
-    <!-- Logging -->
-    <dependency>
-      <groupId>org.apache.logging.log4j</groupId>
-      <artifactId>log4j-core</artifactId>
-      <version>${log4j.version}</version>
-    </dependency>
+    <!-- keep your current deps; below sample shows the ones from your uploads/snippets -->
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
       <artifactId>log4j-api</artifactId>
@@ -123,49 +36,67 @@
       <version>${log4j.version}</version>
     </dependency>
 
-    <!-- Optional MySQL (kept as in your file) -->
+    <!-- leave any other deps you already had (rest-assured, jrobotremoteserver, etc.) -->
+
     <dependency>
       <groupId>com.mysql</groupId>
       <artifactId>mysql-connector-j</artifactId>
       <version>8.4.0</version>
     </dependency>
+
+    <!-- Only if you actually use it at runtime; otherwise you can omit -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>2.0.13</version>
+      <scope>runtime</scope>
+    </dependency>
   </dependencies>
 
   <build>
     <resources>
-      <!-- Standard resources folder -->
+      <!-- Ensure server/src/main/resources/** (log4j2.xml, application.conf, fixInitiator.cfg, login.json) are packaged -->
       <resource>
         <directory>src/main/resources</directory>
-        <includes>
-          <include>**/*</include>
-        </includes>
+        <filtering>false</filtering>
       </resource>
     </resources>
 
     <plugins>
-      <!-- Java 17 -->
       <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-        <version>${compiler.plugin.version}</version>
+        <version>3.13.0</version>
         <configuration>
           <release>${maven.compiler.release}</release>
+          <encoding>${project.build.sourceEncoding}</encoding>
         </configuration>
       </plugin>
 
-      <!-- Shade into a single runnable jar -->
+      <!-- Shade plugin for a fat, executable jar -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
-        <version>${shade.plugin.version}</version>
+        <version>3.5.3</version>
+
+        <!-- ADD the official Log4j transformer as a plugin dependency -->
+        <dependencies>
+          <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-transform-maven-shade-plugin-extensions</artifactId>
+            <version>0.2.0</version>
+          </dependency>
+        </dependencies>
+
         <executions>
           <execution>
             <phase>package</phase>
             <goals><goal>shade</goal></goals>
             <configuration>
               <createDependencyReducedPom>false</createDependencyReducedPom>
-              <minimizeJar>false</minimizeJar>
+
+              <!-- Avoid signed-jar digest issues when shading -->
               <filters>
-                <!-- avoid signature clashes -->
                 <filter>
                   <artifact>*:*</artifact>
                   <excludes>
@@ -175,22 +106,20 @@
                   </excludes>
                 </filter>
               </filters>
+
               <transformers>
-                <!-- Preserve/merge the manifest (Main-Class already works in your jar) -->
-                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer"/>
-                <!-- Merge Log4j2 plugin cache -->
-                <transformer implementation="org.apache.maven.plugins.shade.resource.Log4j2PluginsCacheFileTransformer"/>
+                <!-- Correct Log4j plugin cache merge -->
+                <transformer implementation="org.apache.logging.log4j.maven.plugins.shade.transformer.Log4j2PluginCacheFileTransformer"/>
+                <!-- Keep service providers intact -->
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                <!-- Executable manifest -->
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>com.example.rf.KeywordServer</mainClass>
+                </transformer>
               </transformers>
             </configuration>
           </execution>
         </executions>
-      </plugin>
-
-      <!-- (Optional) copy/expand resources if you ever move configs outside resources -->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-resources-plugin</artifactId>
-        <version>${resources.plugin.version}</version>
       </plugin>
     </plugins>
   </build>
