@@ -11,7 +11,6 @@ pipeline {
   }
 
   environment {
-    // Defaults; can be overridden by parameters above
     RF_HOST = "${params.RF_HOST}"
     RF_PORT = "${params.RF_PORT}"
     BASE    = "${params.BASE}"
@@ -32,15 +31,11 @@ pipeline {
   stages {
 
     stage('Checkout') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
     stage('Build KeywordServer (Maven)') {
-      steps {
-        bat 'mvn -B -DskipTests -pl server -am clean package'
-      }
+      steps { bat 'mvn -B -DskipTests -pl server -am clean package' }
     }
 
     stage('Start KeywordServer') {
@@ -51,14 +46,14 @@ pipeline {
           $workspace = $env:WORKSPACE
           $targetDir = Join-Path $workspace "server\\target"
 
-          # Find newest jar (shade may replace rf-keywords-rbc-1.0.0.jar)
+          # Pick newest JAR (shade may replace the plain jar)
           $jar = Get-ChildItem -Path $targetDir -Filter "*.jar" |
                  Sort-Object LastWriteTime -Descending |
                  Select-Object -First 1
           if (-not $jar) { throw "No JAR found under $targetDir" }
 
-          $stdout = Join-Path $targetDir "keywordserver.out.log"
-          $stderr = Join-Path $targetDir "keywordserver.err.log"
+          $stdout  = Join-Path $targetDir "keywordserver.out.log"
+          $stderr  = Join-Path $targetDir "keywordserver.err.log"
           $pidFile = Join-Path $targetDir "keywordserver.pid"
 
           Write-Host "Starting KeywordServer: $($jar.FullName) on $($env:RF_PORT) (bind $($env:RF_HOST))"
@@ -68,19 +63,24 @@ pipeline {
           $cmdArgs = '/c start "RF KeywordServer" /B java -Drf.port={0} -Drf.host={1} -jar "{2}" 1>"{3}" 2>"{4}"' -f $env:RF_PORT, $env:RF_HOST, $jar.FullName, $stdout, $stderr
           Start-Process -FilePath $cmd -ArgumentList $cmdArgs -WorkingDirectory $targetDir
 
-          # Capture PID by matching command line (jar name + port)
+          # Try to capture PID by matching commandline (jar name + port). Don't fail the stage if this lookup fails.
           Start-Sleep -Seconds 2
-          $javaProcs = Get-CimInstance Win32_Process -Filter "Name=''java.exe''" | ForEach-Object {
-            [PSCustomObject]@{ Id = $_.ProcessId; Cmd = $_.CommandLine }
+          try {
+            $javaProcs = Get-CimInstance -ClassName Win32_Process -Filter "Name='java.exe'" -ErrorAction Stop |
+                         Select-Object ProcessId, CommandLine
+          } catch {
+            # Fallback for older shells
+            $javaProcs = Get-WmiObject -Class Win32_Process -Filter "Name='java.exe'" |
+                         Select-Object ProcessId, CommandLine
           }
           $match = $javaProcs | Where-Object {
-            $_.Cmd -like "*-Drf.port=$($env:RF_PORT)*" -and $_.Cmd -like "*$($jar.Name)*"
+            $_.CommandLine -like "*-Drf.port=$($env:RF_PORT)*" -and $_.CommandLine -like "*$($jar.Name)*"
           } | Select-Object -First 1
 
           if ($null -ne $match) {
-            Set-Content -Path $pidFile -Value $match.Id
+            Set-Content -Path $pidFile -Value $match.ProcessId
           } else {
-            Write-Warning "Could not determine KeywordServer PID. Cleanup will be best-effort."
+            Write-Warning "Could not determine KeywordServer PID (continuing)."
           }
 
           # Probe localhost (127.0.0.1), not 0.0.0.0
@@ -169,12 +169,18 @@ pipeline {
           try {
             $targetJar = (Get-ChildItem -Path (Join-Path $env:WORKSPACE "server\\target") -Filter "*.jar" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
             if ($targetJar) {
-              $procs = Get-CimInstance Win32_Process -Filter "Name=''java.exe''" | ForEach-Object {
-                [PSCustomObject]@{ Id=$_.ProcessId; Cmd=$_.CommandLine }
-              } | Where-Object {
-                $_.Cmd -like "*-Drf.port=$($env:RF_PORT)*" -and $_.Cmd -like "*$targetJar*"
+              try {
+                $procs = Get-CimInstance -ClassName Win32_Process -Filter "Name='java.exe'" -ErrorAction Stop |
+                         Select-Object ProcessId, CommandLine
+              } catch {
+                $procs = Get-WmiObject -Class Win32_Process -Filter "Name='java.exe'" |
+                         Select-Object ProcessId, CommandLine
               }
-              $procs | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+              $procs | Where-Object {
+                $_.CommandLine -like "*-Drf.port=$($env:RF_PORT)*" -and $_.CommandLine -like "*$targetJar*"
+              } | ForEach-Object {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+              }
             }
           } catch { }
         }
