@@ -50,7 +50,7 @@ pipeline {
           New-Item -ItemType Directory -Force -Path "$env:WORKSPACE/$env:ALLURE_RESULTS" | Out-Null
           New-Item -ItemType Directory -Force -Path "$env:WORKSPACE/$env:ROBOT_RESULTS"  | Out-Null
 
-          $jar = Join-Path $env:WORKSPACE "server\\target\\rf-keywords-rbc-1.0.0-shaded.jar"
+          $jar = Join-Path $env:WORKSPACE "server\\target\\rf-keywords-rbc-1.0.0.jar"
           if (!(Test-Path $jar)) { throw "Shaded jar not found: $jar" }
 
           $log     = Join-Path $env:WORKSPACE "keywordserver.log"
