@@ -52,9 +52,10 @@ pipeline {
           $workspace = $env:WORKSPACE
           $targetDir = Join-Path $workspace "server\\target"
 		  
-          # Prefer shaded JAR if present, otherwise the newest jar
-          $jar = Get-ChildItem -Path $targetDir -Filter "rf-keywords-rbc-1.0.0.jar","*.jar" |
+            # Prefer shaded JAR if present, otherwise the newest jar
+          $jar = Get-ChildItem -Path $targetDir -Filter "*-shaded.jar","*.jar" |
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
 
           if (-not $jar) { throw "Shaded JAR not found under $targetDir" }
 
