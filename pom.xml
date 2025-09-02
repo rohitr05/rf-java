@@ -39,6 +39,48 @@
 				</plugins>
 			</build>
 		</profile>
+
+		<profile>
+			<id>robot-win</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.codehaus.mojo</groupId>
+						<artifactId>exec-maven-plugin</artifactId>
+						<version>3.2.0</version>
+						<executions>
+							<execution>
+								<id>run-robot-win</id>
+								<phase>verify</phase>
+								<goals>
+									<goal>exec</goal>
+								</goals>
+								<configuration>
+									<executable>powershell</executable>
+									<arguments>
+										<argument>-NoProfile</argument>
+										<argument>-ExecutionPolicy</argument>
+										<argument>Bypass</argument>
+										<argument>-Command</argument>
+										<argument>py -3 -m pip install -U pip;
+											py -3 -m pip install robotframework
+											robotframework-pabot
+											allure-robotframework; py -3 -m
+											pabot --processes 4 --testlevelsplit
+											--listener
+											'allure_robotframework;results/allure'
+											--outputdir results/robot
+											api_smoke.robot sql_demo.robot
+											fix_demo.robot</argument>
+									</arguments>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+
 	</profiles>
 
 
