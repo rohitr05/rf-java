@@ -6,14 +6,10 @@ Resource  resources/variables.resource
 *** Test Cases ***
 Echo GET should return 200 and args
     REST.Create API Session    echo    ${BASE}    &{EMPTY}
-    # You can keep the query inline...
     REST.Get                   echo    /get?foo=bar    ${EMPTY}    last
     REST.Status Should Be      last    200
-    # Works because library now normalizes $.a.b -> a.b
     ${val}=    REST.Extract Json Path    last    $.args.foo
     Should Be Equal    ${val}    bar
-    # Or even shorter:
-    # REST.Json Path Should Be    last    $.args.foo    bar
 
 POST body and save to file
     ${payload}=    Set Variable    {"hello":"world"}

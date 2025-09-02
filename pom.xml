@@ -1,13 +1,45 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-  <modelVersion>4.0.0</modelVersion>
-  <groupId>com.example</groupId>
-  <artifactId>rf-java-rbc</artifactId>
-  <version>1.0.0</version>
-  <packaging>pom</packaging>
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<groupId>com.example</groupId>
+	<artifactId>rf-java-rbc</artifactId>
+	<version>1.0.0</version>
+	<packaging>pom</packaging>
 
-  <modules>
-    <module>server</module>
-  </modules>
+	<modules>
+		<module>server</module>
+	</modules>
+
+	<profiles>
+		<profile>
+			<id>robot</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.codehaus.mojo</groupId>
+						<artifactId>exec-maven-plugin</artifactId>
+						<version>3.2.0</version>
+						<executions>
+							<execution>
+								<id>run-robot</id>
+								<phase>verify</phase>
+								<goals>
+									<goal>exec</goal>
+								</goals>
+								<configuration>
+									<executable>bash</executable>
+									<arguments>
+										<argument>scripts/run_robot.sh</argument>
+									</arguments>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
+
+
 </project>
