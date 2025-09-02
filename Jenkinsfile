@@ -36,7 +36,6 @@ pipeline {
 
     stage('Build KeywordServer (Maven)') {
       steps {
-        // unchanged
         bat 'mvn -B -DskipTests -pl server -am clean package'
       }
     }
@@ -44,10 +43,12 @@ pipeline {
     stage('Start KeywordServer') {
       steps {
         powershell '''
+          $ErrorActionPreference = "Stop"
+
           $workspace = $env:WORKSPACE
           $targetDir = Join-Path $workspace "server\\target"
 
-          # MINIMAL FIX: find latest *.jar (your build produces rf-keywords-rbc-1.0.0.jar)
+          # Find the newest jar (shade may replace the plain jar)
           $jar = Get-ChildItem -Path $targetDir -Filter "*.jar" |
                  Sort-Object LastWriteTime -Descending |
                  Select-Object -First 1
@@ -56,22 +57,26 @@ pipeline {
 
           $stdout = Join-Path $targetDir "keywordserver.out.log"
           $stderr = Join-Path $targetDir "keywordserver.err.log"
+          $pidFile = Join-Path $targetDir "keywordserver.pid"
 
           $java = (Get-Command java).Source
           $args = "-Drf.port=$env:RF_PORT -Drf.host=$env:RF_HOST -jar `"$($jar.FullName)`""
 
           Write-Host "Starting KeywordServer: $($jar.FullName) on $($env:RF_PORT) (bind $($env:RF_HOST))"
 
-          # keep Start-Process; ensure separate stdout/stderr
+          # Start detached and capture PID for cleanup
           $p = Start-Process -FilePath $java `
               -ArgumentList $args `
               -WorkingDirectory $targetDir `
+              -NoNewWindow `
               -WindowStyle Hidden `
               -RedirectStandardOutput $stdout `
               -RedirectStandardError  $stderr `
               -PassThru
 
-          # MINIMAL FIX: probe localhost instead of 0.0.0.0 (non-routable)
+          Set-Content -Path $pidFile -Value $p.Id
+
+          # Probe localhost (127.0.0.1), not 0.0.0.0
           $deadline = (Get-Date).AddSeconds(90)
           $ok = $false
           do {
@@ -87,13 +92,15 @@ pipeline {
           }
 
           Write-Host "KeywordServer is accepting connections on 127.0.0.1:$($env:RF_PORT)"
+
+          # Finish this step so pipeline can proceed to tests
+          exit 0
         '''
       }
     }
 
     stage('Run Robot (pabot)') {
       steps {
-        // unchanged: install CLI deps & execute tests in parallel
         bat 'py -3 -m pip install -U pip'
         bat 'py -3 -m pip install robotframework robotframework-pabot allure-robotframework'
         bat """
@@ -107,7 +114,6 @@ pipeline {
 
     stage('Publish Allure Report') {
       steps {
-        // unchanged
         allure includeProperties: false, jdk: '', results: [[path: "${env.ALLURE_RESULTS}"]]
       }
     }
@@ -115,21 +121,20 @@ pipeline {
 
   post {
     always {
-      echo 'Stopping Keyword Server (if running).'
+      // Keep artifacts and test results
+      archiveArtifacts artifacts: 'server/target/*.jar, server/target/keywordserver.*.log, results/**', fingerprint: true
+      junit allowEmptyResults: true, testResults: "${env.ROBOT_RESULTS}/output.xml"
+
+      // Clean shutdown of KeywordServer (if started)
       powershell '''
-        $pidFile = Join-Path $env:WORKSPACE "keywordserver.pid"
+        $pidFile = Join-Path $env:WORKSPACE "server\\target\\keywordserver.pid"
         if (Test-Path $pidFile) {
-          $ksPid = Get-Content $pidFile | Select-Object -First 1
-          if ($ksPid) {
-            Write-Host "Stopping KeywordServer PID=$ksPid"
-            try { Stop-Process -Id ([int]$ksPid) -Force -ErrorAction Stop } catch { Write-Warning "Stop-Process failed: $_" }
-          }
-          Remove-Item $pidFile -Force
-        } else {
-          Write-Host "No PID file; nothing to stop."
+          try {
+            $pid = Get-Content $pidFile | Select-Object -First 1
+            if ($pid) { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue }
+          } catch { }
         }
       '''
-      archiveArtifacts artifacts: "${env.ROBOT_RESULTS}/**, ${env.ALLURE_RESULTS}/**", allowEmptyArchive: true
     }
   }
 }
