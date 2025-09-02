@@ -48,33 +48,38 @@ pipeline {
           $workspace = $env:WORKSPACE
           $targetDir = Join-Path $workspace "server\\target"
 
-          # Find the newest jar (shade may replace the plain jar)
+          # Find newest jar (shade may replace rf-keywords-rbc-1.0.0.jar)
           $jar = Get-ChildItem -Path $targetDir -Filter "*.jar" |
                  Sort-Object LastWriteTime -Descending |
                  Select-Object -First 1
-
           if (-not $jar) { throw "No JAR found under $targetDir" }
 
           $stdout = Join-Path $targetDir "keywordserver.out.log"
           $stderr = Join-Path $targetDir "keywordserver.err.log"
           $pidFile = Join-Path $targetDir "keywordserver.pid"
 
-          $java = (Get-Command java).Source
-          $args = "-Drf.port=$env:RF_PORT -Drf.host=$env:RF_HOST -jar `"$($jar.FullName)`""
-
           Write-Host "Starting KeywordServer: $($jar.FullName) on $($env:RF_PORT) (bind $($env:RF_HOST))"
 
-          # NOTE: Do NOT combine -NoNewWindow with -WindowStyle; they are mutually exclusive
-          $p = Start-Process -FilePath $java `
-              -ArgumentList $args `
-              -WorkingDirectory $targetDir `
-              -WindowStyle Hidden `
-              -RedirectStandardOutput $stdout `
-              -RedirectStandardError  $stderr `
-              -PassThru
+          # ---- LAUNCH FULLY DETACHED via cmd.exe /c start /B ----
+          # Use cmd redirection to write logs to files.
+          $cmd = "cmd.exe"
+          $cmdArgs = '/c start "RF KeywordServer" /B java -Drf.port={0} -Drf.host={1} -jar "{2}" 1>"{3}" 2>"{4}"' -f $env:RF_PORT, $env:RF_HOST, $jar.FullName, $stdout, $stderr
+          Start-Process -FilePath $cmd -ArgumentList $cmdArgs -WorkingDirectory $targetDir
 
-          # Save PID for cleanup
-          Set-Content -Path $pidFile -Value $p.Id
+          # Give the process a moment to spawn, then capture its PID by command line (jar + port)
+          Start-Sleep -Seconds 2
+          $javaProcs = Get-CimInstance Win32_Process -Filter "Name='java.exe'" | ForEach-Object {
+            [PSCustomObject]@{ Id = $_.ProcessId; Cmd = $_.CommandLine }
+          }
+          $match = $javaProcs | Where-Object {
+            $_.Cmd -like "*-Drf.port=$($env:RF_PORT)*" -and $_.Cmd -like "*$($jar.Name)*"
+          } | Select-Object -First 1
+
+          if ($null -ne $match) {
+            Set-Content -Path $pidFile -Value $match.Id
+          } else {
+            Write-Warning "Could not determine KeywordServer PID. Cleanup will be best-effort."
+          }
 
           # Probe localhost (127.0.0.1), not 0.0.0.0
           $deadline = (Get-Date).AddSeconds(90)
@@ -92,9 +97,7 @@ pipeline {
           }
 
           Write-Host "KeywordServer is accepting connections on 127.0.0.1:$($env:RF_PORT)"
-
-          # Finish this step so pipeline can proceed to tests
-          exit 0
+          # PowerShell step ends here (server keeps running)
         '''
       }
     }
@@ -121,7 +124,6 @@ pipeline {
 
   post {
     always {
-      // Keep artifacts and test results
       archiveArtifacts artifacts: 'server/target/*.jar, server/target/keywordserver.*.log, results/**', fingerprint: true
       junit allowEmptyResults: true, testResults: "${env.ROBOT_RESULTS}/output.xml"
 
@@ -132,6 +134,19 @@ pipeline {
           try {
             $pid = Get-Content $pidFile | Select-Object -First 1
             if ($pid) { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue }
+          } catch { }
+        } else {
+          # Best-effort cleanup: stop any java with our jar+port in its command line
+          try {
+            $target = (Get-ChildItem -Path (Join-Path $env:WORKSPACE "server\\target") -Filter "*.jar" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
+            if ($target) {
+              $procs = Get-CimInstance Win32_Process -Filter "Name='java.exe'" | ForEach-Object {
+                [PSCustomObject]@{ Id=$_.ProcessId; Cmd=$_.CommandLine }
+              } | Where-Object {
+                $_.Cmd -like "*-Drf.port=$($env:RF_PORT)*" -and $_.Cmd -like "*$target*"
+              }
+              $procs | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+            }
           } catch { }
         }
       '''
