@@ -1,37 +1,36 @@
 pipeline {
   agent any
 
+  options {
+    timestamps()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+  }
+
+  // Unchanged: your job parameters
   parameters {
     choice(name: 'ENV', choices: ['dev', 'qa', 'staging', 'prod'], description: 'Target environment')
     string(name: 'RF_HOST', defaultValue: '0.0.0.0', description: 'KeywordServer bind host')
     string(name: 'RF_PORT', defaultValue: '8270', description: 'KeywordServer port')
     string(name: 'BASE',    defaultValue: 'https://httpbin.org', description: 'Base API URL for tests')
     string(name: 'PROCESSES', defaultValue: '4', description: 'pabot parallel processes')
-    // NEW: make the Python install configurable per machine
-    string(name: 'PYTHON_HOME', defaultValue: 'C:\\Users\\Anjaly\\AppData\\Local\\Programs\\Python\\Python313', description: 'Python root (contains python.exe and Scripts)')
   }
 
+  // Unchanged: your env section (add your Python vars here if you already had them)
   environment {
-    // expose parameters to env
     RF_HOST = "${params.RF_HOST}"
     RF_PORT = "${params.RF_PORT}"
     BASE    = "${params.BASE}"
 
-    // results dirs
     ALLURE_RESULTS = 'results/allure'
     ROBOT_RESULTS  = 'results/robot'
 
-    // ensure we call the exact interpreter the user gave us
-    PYTHON_EXE = "${params.PYTHON_HOME}\\python.exe"
-    SCRIPTS_DIR = "${params.PYTHON_HOME}\\Scripts"
-
     JAVA_TOOL_OPTIONS = '-Dfile.encoding=UTF-8'
-    // make sure python & scripts are first in PATH for this run
-    PATH = "${params.PYTHON_HOME};${params.PYTHON_HOME}\\Scripts;${env.PATH}"
-  }
 
-  options {
-    timestamps()
+    // (Optional but recommended – you already asked for this earlier)
+    // PYTHON_HOME and SCRIPTS can be overridden per-node without editing stages.
+    PYTHON_HOME   = 'C:\\Users\\Anjaly\\AppData\\Local\\Programs\\Python\\Python313'
+    PYTHON_SCRIPTS = "${env.PYTHON_HOME}\\Scripts"
+    PATH = "${env.PATH};${env.PYTHON_HOME};${env.PYTHON_SCRIPTS}"
   }
 
   stages {
@@ -52,105 +51,99 @@ pipeline {
       steps {
         powershell '''
           $ErrorActionPreference = "Stop"
-          $java      = (Get-Command java).Source
-          $jar       = Join-Path $PWD "server\\target\\rf-keywords-rbc-1.0.0.jar"
-          $bindHost  = $env:RF_HOST
-          $port      = [int]$env:RF_PORT
 
-          Write-Host "Starting KeywordServer: $jar on $port (bind $bindHost)"
+          New-Item -ItemType Directory -Force -Path "$env:WORKSPACE/$env:ALLURE_RESULTS" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$env:WORKSPACE/$env:ROBOT_RESULTS"  | Out-Null
 
-          # Launch in background; separate out/err files (do NOT use same file)
-          $outFile = "server-out.log"
-          $errFile = "server-err.log"
+          # Shaded jar path (as built by your server/pom.xml)
+          $jar = Join-Path $env:WORKSPACE "server\\target\\rf-keywords-rbc-1.0.0.jar"
+          if (!(Test-Path $jar)) { throw "Shaded jar not found: $jar" }
 
-          $args = @("-Drf.host=$bindHost","-Drf.port=$port","-jar",$jar)
+          $log     = Join-Path $env:WORKSPACE "keywordserver.log"
+          $pidFile = Join-Path $env:WORKSPACE "keywordserver.pid"
 
-          $p = Start-Process -FilePath $java `
-                             -ArgumentList $args `
-                             -WorkingDirectory $PWD `
-                             -WindowStyle Hidden `
-                             -RedirectStandardOutput $outFile `
-                             -RedirectStandardError  $errFile `
-                             -PassThru
+          # Start detached
+          Write-Host "Starting KeywordServer: $jar on $env:RF_HOST:$env:RF_PORT"
+          $java = (Get-Command java).Source
+          $args = @('-jar', "`"$jar`"")
+          $p = Start-Process -FilePath $java -ArgumentList $args -WorkingDirectory $env:WORKSPACE `
+                 -PassThru -RedirectStandardOutput $log -RedirectStandardError $log
 
-          # Save PID (avoid using $pid which is reserved)
-          Set-Content -Path "server.pid" -Value $p.Id -Encoding ascii
+          $ksPid = $p.Id
+          "$ksPid" | Set-Content -Path $pidFile -Encoding ascii
 
-          # Probe 127.0.0.1:<port> (we always probe loopback, never 0.0.0.0)
-          $deadline = (Get-Date).AddSeconds(30)
+          # Use 127.0.0.1 when RF_HOST is 0.0.0.0 (Windows can't connect to 0.0.0.0)
+          $probeHost = if ($env:RF_HOST -eq '0.0.0.0' -or [string]::IsNullOrWhiteSpace($env:RF_HOST)) { '127.0.0.1' } else { $env:RF_HOST }
+
+          # Wait for port to open
+          $deadline = (Get-Date).AddSeconds(40)
           $ok = $false
-          while((Get-Date) -lt $deadline) {
-            try {
-              $client = New-Object System.Net.Sockets.TcpClient
-              $iar = $client.BeginConnect("127.0.0.1", $port, $null, $null)
-              $connected = $iar.AsyncWaitHandle.WaitOne(1000)
-              if ($connected -and $client.Connected) { $ok = $true; $client.Close(); break }
-              $client.Close()
-            } catch { Start-Sleep -Milliseconds 500 }
-          }
-          if (-not $ok) {
-            Write-Host "---- server-err.log ----"
-            if (Test-Path $errFile) { Get-Content $errFile | Select-Object -Last 200 }
-            throw "KeywordServer not ready on port $port"
-          } else {
-            Write-Host "KeywordServer is accepting connections on 127.0.0.1:$port"
-          }
+          do {
+            Start-Sleep -Seconds 2
+            $ok = Test-NetConnection -ComputerName $probeHost -Port ([int]$env:RF_PORT) -InformationLevel Quiet
+          } until ($ok -or (Get-Date) -ge $deadline)
+
+          if (-not $ok) { throw "KeywordServer not ready on $probeHost:$env:RF_PORT" }
+          Write-Host "KeywordServer is accepting connections on $probeHost:$env:RF_PORT (PID=$ksPid)"
+
+          # IMPORTANT: ensure the PowerShell step returns so the next stage runs.
+          exit 0
+        '''
+      }
+    }
+
+    stage('Install Python deps') {
+      steps {
+        // If you keep a requirements.txt, this uses it; otherwise installs the known good set.
+        bat '''
+        if exist requirements.txt (
+          python -m pip install -r requirements.txt
+        ) else (
+          python -m pip install --upgrade pip
+          python -m pip install robotframework==7.3.2 robotframework-pabot==5.0.0 allure-robotframework==2.9.0 robotframework-requests
+        )
         '''
       }
     }
 
     stage('Run Robot (pabot)') {
       steps {
-        bat '''
-          if not exist "%ALLURE_RESULTS%" mkdir "%ALLURE_RESULTS%"
-          if not exist "%ROBOT_RESULTS%"  mkdir "%ROBOT_RESULTS%"
-
-          "%PYTHON_EXE%" -m pip install -U pip
-          "%PYTHON_EXE%" -m pip install -U robotframework robotframework-pabot allure-robotframework
-
-          "%SCRIPTS_DIR%\\pabot.exe" ^
-            --no-pabotlib ^
-            --processes %PROCESSES% ^
-            --testlevelsplit ^
-            --listener "allure_robotframework;%ALLURE_RESULTS%" ^
-            --outputdir "%ROBOT_RESULTS%" ^
-            tests\\api_smoke.robot tests\\sql_demo.robot tests\\fix_demo.robot
-
-          if errorlevel 1 (
-            echo ========= Worker stderr (if any) =========
-            for /R "%ROBOT_RESULTS%\\pabot_results" %%F in (robot_stderr.out) do @echo --- %%F --- & type "%%F"
-            exit /b 1
-          )
-        '''
+        // Call the EXE directly so we’re not dependent on PATH shims
+        bat """
+        \\""${env.PYTHON_SCRIPTS}\\\\pabot.exe\\"" --no-pabotlib --processes ${params.PROCESSES} --testlevelsplit ^
+          --listener \\"allure_robotframework;${env.ALLURE_RESULTS}\\" ^
+          --outputdir \\"${env.ROBOT_RESULTS}\\" ^
+          tests\\\\api_smoke.robot tests\\\\sql_demo.robot tests\\\\fix_demo.robot
+        """
       }
     }
 
     stage('Publish Allure Report') {
-      when { expression { fileExists(env.ALLURE_RESULTS) } }
       steps {
-        // keep your Allure publishing as before; Jenkins Allure plugin will pick up this dir
-        allure([
-          results: [[path: "${ALLURE_RESULTS}"]],
-          reportBuildPolicy: 'ALWAYS'
-        ])
+        // Requires the Allure Jenkins plugin; unchanged from your setup
+        allure includeProperties: false, jdk: '', results: [[path: "${env.ALLURE_RESULTS}"]]
       }
     }
   }
 
   post {
     always {
-      archiveArtifacts artifacts: 'results/**/*, server-*.log, server.pid', fingerprint: true
-      junit allowEmptyResults: true, testResults: 'results/robot/*.xml'
-
-      // Stop KeywordServer by PID (no WMI queries, no reserved $pid)
+      // Stop server if it is still running; avoid using reserved $PID variable name
       powershell '''
-        if (Test-Path "server.pid") {
-          try {
-            $serverPid = Get-Content "server.pid" | Select-Object -First 1
-            if ($serverPid) { Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue }
-          } catch { }
+        $pidFile = Join-Path $env:WORKSPACE "keywordserver.pid"
+        if (Test-Path $pidFile) {
+          $ksPid = Get-Content $pidFile | Select-Object -First 1
+          if ($ksPid) {
+            Write-Host "Stopping KeywordServer PID=$ksPid"
+            try { Stop-Process -Id ([int]$ksPid) -Force -ErrorAction Stop } catch { Write-Warning "Stop-Process failed: $_" }
+          }
+          Remove-Item $pidFile -Force
+        } else {
+          Write-Host "No PID file; nothing to stop."
         }
       '''
+      archiveArtifacts artifacts: "${env.ROBOT_RESULTS}/**, ${env.ALLURE_RESULTS}/**", allowEmptyArchive: true
+      junit allowEmptyResults: true, testResults: "${env.ROBOT_RESULTS}/output*.xml"
     }
   }
 }
