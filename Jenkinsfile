@@ -138,7 +138,7 @@ pipeline {
         bat 'if not exist "%ROBOT_RESULTS%"  mkdir "%ROBOT_RESULTS%"'
 
         // >>> Minimal fix: disable PabotLib (no extra port, no handshake)
-        bat '"%PY_SCRIPTS%\\pabot.exe" --no-pabotlib --processes %PROCESSES% --testlevelsplit --listener "allure_robotframework;%ALLURE_RESULTS%" --outputdir "%ROBOT_RESULTS%" api_smoke.robot sql_demo.robot fix_demo.robot'
+        bat '"%PY_SCRIPTS%\\pabot.exe" --no-pabotlib --processes %PROCESSES% --testlevelsplit --listener "allure_robotframework;%ALLURE_RESULTS%" --outputdir "%ROBOT_RESULTS%" tests\api_smoke.robot tests\sql_demo.robot tests\fix_demo.robot'
       }
     }
 
