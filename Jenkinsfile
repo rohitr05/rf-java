@@ -39,7 +39,6 @@ pipeline {
 
     stage('Start KeywordServer') {
       steps {
-        // If startup is flaky/slow, retry once after a clean stop/port clear
         retry(2) {
           powershell '''
             $ErrorActionPreference = "Stop"
@@ -49,7 +48,7 @@ pipeline {
             $stderr    = Join-Path $targetDir "keywordserver.err.log"
             $pidFile   = Join-Path $targetDir "keywordserver.pid"
 
-            # 0) If a previous PID file exists, try to stop it first (idempotent)
+            # Stop previous server if PID file exists
             if (Test-Path $pidFile) {
               try {
                 $serverPid = Get-Content $pidFile | Select-Object -First 1
@@ -58,7 +57,7 @@ pipeline {
               Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
             }
 
-            # 1) If the port is already held, free it (handles orphaned servers)
+            # Free the port if something is already listening
             try {
               $conn = Get-NetTCPConnection -State Listen -LocalPort ([int]$env:RF_PORT) -ErrorAction Stop | Select-Object -First 1
               if ($conn) {
@@ -66,7 +65,6 @@ pipeline {
                 Start-Sleep -Seconds 2
               }
             } catch {
-              # Fallback for older hosts without Get-NetTCPConnection
               $line = netstat -ano | Select-String -Pattern "LISTENING.*:$($env:RF_PORT)\\s"
               if ($line) {
                 $parts = ($line.ToString() -split "\\s+") | Where-Object { $_ -ne "" }
@@ -78,20 +76,20 @@ pipeline {
               }
             }
 
-            # 2) Pick newest JAR (shade may replace the plain jar)
+            # Pick newest JAR
             $jar = Get-ChildItem -Path $targetDir -Filter "rf-keywords-rbc-*.jar" |
                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
             if (-not $jar) { throw "KeywordServer jar not found under $targetDir" }
 
             Write-Host "Starting KeywordServer: $($jar.FullName) on $($env:RF_PORT) (bind $($env:RF_HOST))"
 
-            # 3) Start detached (cmd /c start /B) with redirection
+            # Start detached (cmd /c start /B) with redirection
             $cmd = "cmd.exe"
             $cmdArgs = '/c start "RF KeywordServer" /B java -Drf.port={0} -Drf.host={1} -jar "{2}" 1>"{3}" 2>"{4}"' `
                        -f $env:RF_PORT, $env:RF_HOST, $jar.FullName, $stdout, $stderr
             Start-Process -FilePath $cmd -ArgumentList $cmdArgs -WorkingDirectory $targetDir
 
-            # 4) Try to capture PID (non-fatal if it fails)
+            # Try to capture PID (non-fatal if it fails)
             Start-Sleep -Seconds 2
             try {
               $javaProcs = Get-CimInstance -ClassName Win32_Process -Filter "Name='java.exe'" -ErrorAction Stop |
@@ -105,7 +103,7 @@ pipeline {
             } | Select-Object -First 1
             if ($null -ne $match) { Set-Content -Path $pidFile -Value $match.ProcessId }
 
-            # 5) Probe localhost steadily up to 120s (server binds to 0.0.0.0; loopback is routable)
+            # Probe localhost up to 120s
             $deadline = (Get-Date).AddSeconds(120)
             $ok = $false
             do {
@@ -129,14 +127,13 @@ pipeline {
 
     stage('Run Robot (pabot)') {
       steps {
-        // Use configured Python; fail clearly if not present
         bat 'if not exist "%PYTHON_EXE%" ( echo ERROR: Python not found at "%PYTHON_EXE%" & exit /b 1 )'
         bat '"%PYTHON_EXE%" -m pip install -U pip'
         bat '"%PYTHON_EXE%" -m pip install robotframework robotframework-pabot allure-robotframework'
         bat 'if not exist "%ALLURE_RESULTS%" mkdir "%ALLURE_RESULTS%"'
         bat 'if not exist "%ROBOT_RESULTS%"  mkdir "%ROBOT_RESULTS%"'
-        // Use the Windows launcher for pabot to avoid "cannot be directly executed" issues
-        bat '"%PY_SCRIPTS%\\pabot.exe" --processes ${params.PROCESSES} --testlevelsplit --listener "allure_robotframework;%ALLURE_RESULTS%" --outputdir "%ROBOT_RESULTS%" api_smoke.robot sql_demo.robot fix_demo.robot'
+        // *** FIXED: use %PROCESSES% so Windows expands the Jenkins parameter ***
+        bat '"%PY_SCRIPTS%\\pabot.exe" --processes %PROCESSES% --testlevelsplit --listener "allure_robotframework;%ALLURE_RESULTS%" --outputdir "%ROBOT_RESULTS%" api_smoke.robot sql_demo.robot fix_demo.robot'
       }
     }
 
@@ -153,7 +150,7 @@ pipeline {
       archiveArtifacts artifacts: 'server/target/*.jar, server/target/keywordserver.*.log, results/**, **/server.pid', fingerprint: true
       junit allowEmptyResults: true, testResults: 'results/robot/output*.xml'
 
-      // Clean shutdown of KeywordServer (use a different var name than $PID)
+      // Clean shutdown of KeywordServer
       powershell '''
         $ErrorActionPreference = "SilentlyContinue"
         $pidFile   = Join-Path $env:WORKSPACE "server\\target\\keywordserver.pid"
@@ -163,7 +160,6 @@ pipeline {
           if ($serverPid) { Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue }
           Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
         } else {
-          # Best-effort by matching jar+port
           $targetJar = (Get-ChildItem -Path (Join-Path $env:WORKSPACE "server\\target") -Filter "rf-keywords-rbc-*.jar" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
           if ($targetJar) {
             try {
