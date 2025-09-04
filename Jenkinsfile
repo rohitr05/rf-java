@@ -8,7 +8,14 @@ pipeline {
     string(name: 'RF_PORT', defaultValue: '8270', description: 'KeywordServer port')
     string(name: 'BASE',    defaultValue: 'https://httpbin.org', description: 'Base API URL for tests')
     string(name: 'PROCESSES', defaultValue: '4', description: 'pabot parallel processes')
-    string(name: 'PY_HOME', defaultValue: 'C:\\Users\\Anjaly\\AppData\\Local\\Programs\\Python\\Python313', description: 'Python home (folder with python.exe and Scripts)')
+
+    // Python per-agent
+    string(name: 'PY_HOME', defaultValue: 'C:\\Users\\Anjaly\\AppData\\Local\\Programs\\Python\\Python313',
+           description: 'Python home (folder with python.exe and Scripts)')
+
+    // NEW: move pabot’s internal server off 8270 to avoid collision with KeywordServer
+    string(name: 'PABOTLIB_PORT', defaultValue: '8271',
+           description: 'Port for pabot’s coordination server (PabotLib); must differ from RF_PORT')
   }
 
   environment {
@@ -20,6 +27,9 @@ pipeline {
     PY_HOME     = "${params.PY_HOME}"
     PYTHON_EXE  = "${env.PY_HOME}\\python.exe"
     PY_SCRIPTS  = "${env.PY_HOME}\\Scripts"
+
+    // PabotLib coordination server port
+    PABOTLIB_PORT = "${params.PABOTLIB_PORT}"
 
     // POSIX-style result dirs (kept as-is)
     ALLURE_RESULTS = 'results/allure'
@@ -39,6 +49,7 @@ pipeline {
 
     stage('Start KeywordServer') {
       steps {
+        // If startup is flaky/slow, retry once after a clean stop/port clear
         retry(2) {
           powershell '''
             $ErrorActionPreference = "Stop"
@@ -57,7 +68,7 @@ pipeline {
               Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
             }
 
-            # Free the port if something is already listening
+            # Free the RF port (handles orphaned servers)
             try {
               $conn = Get-NetTCPConnection -State Listen -LocalPort ([int]$env:RF_PORT) -ErrorAction Stop | Select-Object -First 1
               if ($conn) {
@@ -132,8 +143,9 @@ pipeline {
         bat '"%PYTHON_EXE%" -m pip install robotframework robotframework-pabot allure-robotframework'
         bat 'if not exist "%ALLURE_RESULTS%" mkdir "%ALLURE_RESULTS%"'
         bat 'if not exist "%ROBOT_RESULTS%"  mkdir "%ROBOT_RESULTS%"'
-        // *** FIXED: use %PROCESSES% so Windows expands the Jenkins parameter ***
-        bat '"%PY_SCRIPTS%\\pabot.exe" --processes %PROCESSES% --testlevelsplit --listener "allure_robotframework;%ALLURE_RESULTS%" --outputdir "%ROBOT_RESULTS%" api_smoke.robot sql_demo.robot fix_demo.robot'
+
+        // >>> Pabot on its own port to avoid clashing with KeywordServer (RF_PORT)
+        bat '"%PY_SCRIPTS%\\pabot.exe" --pabotlib --pabotlibhost 127.0.0.1 --pabotlibport %PABOTLIB_PORT% --processes %PROCESSES% --testlevelsplit --listener "allure_robotframework;%ALLURE_RESULTS%" --outputdir "%ROBOT_RESULTS%" api_smoke.robot sql_demo.robot fix_demo.robot'
       }
     }
 
