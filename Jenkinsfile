@@ -4,12 +4,34 @@ pipeline {
     timestamps()
     timeout(time: 45, unit: 'MINUTES')
   }
-  environment {
-    RF_PORT = '8270'
-    RF_HOST = '127.0.0.1'   // your Robot suites use http://127.0.0.1:8270/...
-    // tweakable knobs (do not rename existing ones)
-    PABOT_PROCESSES = '4'
+  parameters {
+    choice(name: 'ENV', choices: ['dev', 'qa', 'staging', 'prod'], description: 'Target environment')
+    string(name: 'RF_HOST', defaultValue: '0.0.0.0', description: 'KeywordServer bind host')
+    string(name: 'RF_PORT', defaultValue: '8270', description: 'KeywordServer port')
+    string(name: 'BASE',    defaultValue: 'https://httpbin.org', description: 'Base API URL for tests')
+    string(name: 'PROCESSES', defaultValue: '4', description: 'pabot parallel processes')
+    // Windows Python root (so it can be changed per agent without editing the file)
+    string(name: 'PY_HOME', defaultValue: 'C:\\Users\\Anjaly\\AppData\\Local\\Programs\\Python\\Python313', description: 'Root folder containing python.exe and Scripts\\')
+  	string(name: 'JAVA_HOME', defaultValue: 'C:\\Program Files\\Java\\jdk-17', description: 'java-home')
+    string(name: 'M2_HOME', defaultValue: 'C:\\Users\\Anjaly\\OneDrive\\Documents\\Rohit\\apache-maven-3.9.11', description: 'maven-home')
   }
+
+    
+  environment {
+    RF_HOST = "${params.RF_HOST}"
+    RF_PORT = "${params.RF_PORT}"
+    BASE    = "${params.BASE}"
+	JAVA_HOME = "${params.JAVA_HOME}"
+	M2_HOME = "${params.M2_HOME}"
+    PY_HOME = "${params.PY_HOME}"
+    PATH    = "${env.PATH};${env.PY_HOME};${env.PY_HOME}\\Scripts"
+
+    ALLURE_RESULTS = 'results/allure'
+    ROBOT_RESULTS  = 'results/robot'
+
+    JAVA_TOOL_OPTIONS = '-Dfile.encoding=UTF-8'
+  }
+
 
   stages {
     stage('Checkout') {
@@ -25,7 +47,7 @@ pipeline {
           Write-Host "PATH: $env:PATH"
           Write-Host "JAVA_HOME: $env:JAVA_HOME"
           Write-Host "M2_HOME: $env:M2_HOME"
-          Write-Host "PYTHON_HOME: $env:PYTHON_HOME"
+          Write-Host "PYTHON_HOME: $env:PY_HOME"
 
           Write-Host "`n=== TOOL VERSIONS ==="
           cmd /c "where java" | Out-Host
