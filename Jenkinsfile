@@ -5,10 +5,9 @@ pipeline {
     timeout(time: 45, unit: 'MINUTES')
   }
   environment {
-    RF_PORT   = '8270'
-    RF_HOST   = '127.0.0.1'     // Robot tests point to http://127.0.0.1:8270/...
-    JAR_PATH  = 'server\\target\\rf-keywords-rbc-1.0.0-shaded.jar'
-    PY       = 'python'         // or full path if you prefer
+    RF_PORT  = '8270'
+    RF_HOST  = '127.0.0.1'
+    PY       = 'python'   // change to full path if needed
   }
 
   stages {
@@ -18,7 +17,7 @@ pipeline {
 
     stage('Build KeywordServer (Maven)') {
       steps {
-        // Build only the server module and its deps; skip tests to speed up.
+        // Build server module (fat jar produced under server\target\*-shaded.jar)
         bat 'mvn -B -DskipTests -pl server -am clean package'
       }
     }
@@ -28,17 +27,32 @@ pipeline {
         powershell '''
           $ErrorActionPreference = "Stop"
 
-          $jarToRun = "${env:JAR_PATH}"
+          # Show where we are and what's inside target (debug-friendly)
+          $ws = (Resolve-Path ".").Path
+          Write-Host "Workspace: $ws"
+          if (Test-Path "server\\target") {
+            Write-Host "server\\target contents:"
+            Get-ChildItem "server\\target" | ForEach-Object { $_.FullName } | Out-Host
+          } else {
+            throw "server\\target directory not found under workspace: $ws"
+          }
+
+          # Resolve latest shaded jar by glob to avoid hardcoded version
+          $jarFile = Get-ChildItem -Path "server\\target" -Filter "*-shaded.jar" -File `
+                      | Sort-Object LastWriteTime -Descending `
+                      | Select-Object -First 1
+
+          if (-not $jarFile) {
+            throw "No *-shaded.jar found in server\\target (build step may have failed or artifact moved)."
+          }
+
+          $jarToRun = $jarFile.FullName
           $bindHost = "${env:RF_HOST}"
           $port     = [int]"${env:RF_PORT}"
 
-          if (!(Test-Path $jarToRun)) {
-            throw "Jar not found: $jarToRun"
-          }
-
           Write-Host ("Starting KeywordServer: {0} on {1}:{2}" -f $jarToRun, $bindHost, $port)
 
-          # Start server detached and capture PID + logs
+          # Start detached and capture PID + logs
           $args = "-Drf.port=$port -Drf.host=$bindHost -jar `"$jarToRun`""
           $proc = Start-Process -FilePath "java" -ArgumentList $args `
                                 -RedirectStandardOutput "keywordserver.out" `
@@ -48,7 +62,7 @@ pipeline {
           $serverPid = $proc.Id
           Set-Content -Path "server.pid" -Value $serverPid
 
-          # Wait for port 8270 to be reachable (max ~60s)
+          # Health-check TCP port (up to ~60s)
           $deadline = (Get-Date).AddSeconds(60)
           do {
             Start-Sleep -Seconds 2
@@ -57,11 +71,12 @@ pipeline {
           } while ((Get-Date) -lt $deadline)
 
           if (-not $ready) {
-            Get-Content -Path "keywordserver.err" -ErrorAction SilentlyContinue | Out-Host
+            Write-Host "------ keywordserver.err (tail) ------"
+            Get-Content "keywordserver.err" -Tail 200 | Out-Host
             throw "KeywordServer did not open port $port within 60 seconds."
           }
 
-          Write-Host "KeywordServer is UP at $($bindHost):$port (PID=$serverPid)"
+          Write-Host ("KeywordServer UP: http://{0}:{1} (PID={2})" -f $bindHost, $port, $serverPid)
         '''
       }
     }
@@ -83,27 +98,26 @@ pipeline {
         powershell '''
           $ErrorActionPreference = "Stop"
 
-          $outDir = "reports"
+          $outDir    = "reports"
           $allureOut = "allure-results"
-          New-Item -ItemType Directory -Force -Path $outDir      | Out-Null
-          New-Item -ItemType Directory -Force -Path $allureOut   | Out-Null
+          New-Item -ItemType Directory -Force -Path $outDir    | Out-Null
+          New-Item -ItemType Directory -Force -Path $allureOut | Out-Null
 
-          # Run all .robot at repo root and subfolders; adjust if you keep them under ./tests
+          # Adjust the trailing path if your .robot files are under ./tests
           .\\.venv\\Scripts\\pabot `
-            --processes 3 `
+            --processes 4 `
             --outputdir $outDir `
             --listener "allure_robotframework;./$allureOut" `
             --variable BASE:http://httpbin.org `
-            ./tests
+            .
 
-          if ($LASTEXITCODE -ne 0) { throw "Robot/pabot failed with code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "Robot/pabot failed ($LASTEXITCODE)" }
         '''
       }
     }
 
     stage('Publish Allure Report') {
       steps {
-        // Requires "Allure Jenkins" plugin
         allure includeProperties: false, jdk: '', results: [[path: 'allure-results']]
       }
     }
@@ -111,7 +125,6 @@ pipeline {
 
   post {
     always {
-      // Always try to stop the KeywordServer to keep the agent clean
       powershell '''
         if (Test-Path "server.pid") {
           try {
