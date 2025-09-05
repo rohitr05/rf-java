@@ -1,3 +1,4 @@
-robotframework>=6.1
-robotframework-pabot>=3.2
-allure-robotframework>=2.13.5
+robotframework==7.1.1
+robotframework-pabot==2.17.0
+allure-robotframework==2.13.4
+requests
