@@ -8,6 +8,8 @@ import quickfix.field.*;
 import quickfix.fix44.NewOrderSingle;
 
 import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.FileNotFoundException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
@@ -34,15 +36,42 @@ public class FixKeywords implements Application {
     @Override public void fromAdmin(Message msg, SessionID sid) { /* no-op */ }
     @Override public void fromApp(Message msg, SessionID sid) { inbox.offer(msg); }
 
-    @RobotKeyword("Start FIX initiator with cfg file.")
+    /**
+     * Start a FIX initiator using the supplied configuration file. If the filename begins
+     * with {@code classpath:} the remainder will be loaded from the classpath via the current
+     * class loader. Otherwise a normal {@link FileInputStream} is used. This supports packaging
+     * configuration files inside the resources folder so that tests are portable.
+     *
+     * @param cfgFile The path to the FIX initiator configuration file or {@code classpath:...}
+     * @throws Exception if the configuration cannot be found or the initiator fails to start
+     */
+    @RobotKeyword("Start FIX initiator with cfg file. Supports 'classpath:' prefix for files bundled in resources.")
     @ArgumentNames({"cfgFile"})
     public void startInitiator(String cfgFile) throws Exception {
-        SessionSettings settings = new SessionSettings(new FileInputStream(cfgFile));
+        SessionSettings settings;
+        InputStream cfgStream = null;
+        if (cfgFile != null && cfgFile.startsWith("classpath:")) {
+            String resource = cfgFile.substring("classpath:".length());
+            // remove any leading slashes so ResourceLoader can find it
+            while (resource.startsWith("/") || resource.startsWith("\\")) {
+                resource = resource.substring(1);
+            }
+            cfgStream = FixKeywords.class.getClassLoader().getResourceAsStream(resource);
+            if (cfgStream == null) {
+                throw new FileNotFoundException("FIX config resource not found on classpath: " + resource);
+            }
+            settings = new SessionSettings(cfgStream);
+        } else {
+            settings = new SessionSettings(new FileInputStream(cfgFile));
+        }
         MessageStoreFactory storeFactory = new FileStoreFactory(settings);
         LogFactory logFactory = new ScreenLogFactory(true, true, true);
         MessageFactory msgFactory = new DefaultMessageFactory();
         initiator = new SocketInitiator(this, storeFactory, settings, logFactory, msgFactory);
         initiator.start();
+        if (cfgStream != null) {
+            cfgStream.close();
+        }
     }
 
     @RobotKeyword("Wait until FIX session is logged on (timeout seconds).")

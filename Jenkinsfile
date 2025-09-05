@@ -47,12 +47,14 @@ pipeline {
 
           $ws        = $env:WORKSPACE
           $targetDir = Join-Path $ws "server\\target"
-          $jar       = Join-Path $targetDir "rf-keywords-rbc-1.0.0.jar"
+          # Try shaded jar first then fallback to explicit jar name
+          $jar = Get-ChildItem -Path $targetDir -Filter '*-shaded.jar' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.FullName }
+          if (-not $jar) { $jar = Join-Path $targetDir 'rf-keywords-rbc-1.0.0.jar' }
           if (!(Test-Path $jar)) { throw "KeywordServer jar not found: $jar" }
 
-          $stdout    = Join-Path $targetDir "keywordserver.out.log"
-          $stderr    = Join-Path $targetDir "keywordserver.err.log"
-          $pidFile   = Join-Path $targetDir "keywordserver.pid"
+          $stdout    = Join-Path $targetDir 'keywordserver.out.log'
+          $stderr    = Join-Path $targetDir 'keywordserver.err.log'
+          $pidFile   = Join-Path $targetDir 'keywordserver.pid'
 
           # Stop previous instance via PID file (best effort)
           if (Test-Path $pidFile) {
@@ -75,9 +77,9 @@ pipeline {
             $pattern = ("LISTENING.*:{0} " -f $env:RF_PORT)  # literal space after port
             $line = netstat -ano | Select-String -Pattern $pattern
             if ($line) {
-              $parts = ($line.ToString() -split "\\s+") | Where-Object { $_ -ne "" }
+              $parts = ($line.ToString() -split '\s+') | Where-Object { $_ -ne '' }
               $pidCol = $parts[-1]
-              if ($pidCol -match '^\\d+$') {
+              if ($pidCol -match '^\d+$') {
                 try { Stop-Process -Id ([int]$pidCol) -Force -ErrorAction SilentlyContinue } catch { }
                 Start-Sleep -Seconds 2
               }
@@ -132,6 +134,8 @@ pipeline {
 
           "%PYTHON_EXE%" -m pip install -U pip
           "%PYTHON_EXE%" -m pip install -U robotframework robotframework-pabot allure-robotframework
+    
+          set PATH=%PY_SCRIPTS%;%PY_HOME%;%PATH%
 
           "%PY_SCRIPTS%\\pabot.exe" ^
             --no-pabotlib ^
