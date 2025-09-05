@@ -85,7 +85,7 @@ pipeline {
             throw "server\\target not found in $ws"
           }
 
-          $jarFile = Get-ChildItem -Path "server\\target" -Filter "rf-keywords-rbc-1.0.0.jar" -File `
+          $jarFile = Get-ChildItem -Path "server\\target" -Filter "*-shaded.jar" -File `
                       | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $jarFile) {
             throw "No runnable *-shaded.jar found in server\\target."
@@ -109,15 +109,23 @@ pipeline {
           $bindHost = "${env:RF_HOST}"
           $port     = [int]"${env:RF_PORT}"
           
-          # **FIX**: Apply file.encoding only to this specific Java process
           $args = "-Dfile.encoding=UTF-8 -Drf.port=$port -Drf.host=$bindHost -jar `"$jarToRun`""
           Write-Host ("java " + $args)
+
+          # **FIX**: Temporarily unset the Jenkins cookie to detach the spawned process
+          # from the build's process tree, allowing the pipeline to continue.
+          $originalCookie = $env:JENKINS_NODE_COOKIE
+          Remove-Item Env:JENKINS_NODE_COOKIE
 
           # Launch detached and capture PID + logs
           $proc = Start-Process -FilePath "java" -ArgumentList $args `
                                 -RedirectStandardOutput "keywordserver.out" `
                                 -RedirectStandardError  "keywordserver.err" `
                                 -PassThru -WindowStyle Hidden
+          
+          # Restore the cookie immediately for any subsequent commands
+          $env:JENKINS_NODE_COOKIE = $originalCookie
+          
           $serverPid = $proc.Id
           Set-Content -Path "server.pid" -Value $serverPid
           
@@ -164,7 +172,7 @@ pipeline {
           
           Write-Host "`nActivating venv and installing/upgrading dependencies..."
           .\\.venv\\Scripts\\python -m pip install --upgrade pip
-          .\\.venv\\Scripts\\pip install -r requirements.txt | Out-Host
+          .\\.venv\\Scripts\\pip install -r tests/requirements.txt | Out-Host
 
           Write-Host "`n--- Tool Versions from venv ---"
           .\\.venv\\Scripts\\python --version
