@@ -85,7 +85,7 @@ pipeline {
             throw "server\\target not found in $ws"
           }
 
-          $jarFile = Get-ChildItem -Path "server\\target" -Filter "*-shaded.jar" -File `
+          $jarFile = Get-ChildItem -Path "server\\target" -Filter "rf-keywords-rbc-1.0.0.jar" -File `
                       | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $jarFile) {
             throw "No runnable *-shaded.jar found in server\\target."
