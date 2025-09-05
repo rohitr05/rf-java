@@ -1,34 +1,25 @@
 pipeline {
   agent any
+
   options {
     timestamps()
-    skipDefaultCheckout(true)
+    timeout(time: 45, unit: 'MINUTES')
   }
 
   parameters {
-    choice(name: 'ENV', choices: ['dev', 'qa', 'staging', 'prod'], description: 'Target environment')
-    string(name: 'RF_HOST', defaultValue: '0.0.0.0', description: 'KeywordServer bind host')
-    string(name: 'RF_PORT', defaultValue: '8270', description: 'KeywordServer port')
-    string(name: 'BASE',    defaultValue: 'https://httpbin.org', description: 'Base API URL for tests')
-    string(name: 'PROCESSES', defaultValue: '4', description: 'pabot parallel processes')
-    // Windows Python locations (editable per machine)
-    string(name: 'PYTHON_HOME',    defaultValue: 'C:\\Users\\Anjaly\\AppData\\Local\\Programs\\Python\\Python313', description: 'Python installation dir')
-    string(name: 'PYTHON_SCRIPTS', defaultValue: 'C:\\Users\\Anjaly\\AppData\\Local\\Programs\\Python\\Python313\\Scripts', description: 'Python Scripts dir')
+    string(name: 'PYTHON_EXE',
+           defaultValue: 'C:\\Users\\Anjaly\\AppData\\Local\\Programs\\Python\\Python313\\python.exe',
+           description: 'Absolute path to python.exe used to run pabot')
+    string(name: 'RF_HOST', defaultValue: '0.0.0.0', description: 'Bind host for KeywordServer')
+    string(name: 'RF_PORT', defaultValue: '8270', description: 'Port for KeywordServer')
+    string(name: 'PROCESSES', defaultValue: '4', description: 'Pabot parallel processes')
   }
 
   environment {
-    // Defaults (driven by parameters)
+    // Make these available to Java (KeywordServer reads env or -D)
     RF_HOST = "${params.RF_HOST}"
     RF_PORT = "${params.RF_PORT}"
-    BASE    = "${params.BASE}"
-    PROCESSES = "${params.PROCESSES}"
-
-    // Results (forward slashes are OK on Windows, and friendlier for tools)
-    ALLURE_RESULTS = 'results/allure'
-    ROBOT_RESULTS  = 'results/robot'
-
-    // Encoding for Maven/Java build
-    JAVA_TOOL_OPTIONS = '-Dfile.encoding=UTF-8'
+    PATH    = "${params.PYTHON_EXE}\\..\\Scripts;${env.PATH}"
   }
 
   stages {
@@ -47,106 +38,105 @@ pipeline {
 
     stage('Start KeywordServer') {
       steps {
-        // Start detached, probe loopback (127.0.0.1), then return
+        // IMPORTANT: launch the shaded jar (or the main jar that Maven replaces with shaded),
+        // not the original-*.jar, and do NOT block this step on the Java process.
         powershell '''
-          $ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 
-          $ws   = $env:WORKSPACE
-          $jarDir = Join-Path $ws "server\\target"
-          $jar = Get-ChildItem -Path $jarDir -Filter "*-shaded.jar" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $jar) {
-            $jar = Get-ChildItem -Path $jarDir -Filter "*.jar" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch "-sources|-javadoc" } | Select-Object -First 1
-          }
-          if (-not $jar) {
-            throw "Could not find server jar in $jarDir"
-          }
+$bindHost = $env:RF_HOST
+$port     = [int]$env:RF_PORT
+$root     = (Resolve-Path ".").Path
+$target   = Join-Path $root "server\\target"
 
-          $java = (Get-Command java).Source
-          if (-not $java) { throw "java not found in PATH" }
+# 1) Kill anything already using the port (leftover runs)
+$inUse = netstat -ano | Select-String ":$port\\s" | ForEach-Object { ($_ -split "\\s+")[($PSItem -split "\\s+").Length-1] } | Select-Object -Unique
+foreach ($pid in $inUse) {
+  try { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } catch {}
+}
 
-          $bindHost  = $env:RF_HOST
-          $probeHost = "127.0.0.1"
+# 2) Pick the RIGHT jar:
+# Prefer the main artifact rf-keywords-rbc-1.0.0.jar (Maven shade REPLACES this with shaded one),
+# fallback to an explicit *-shaded.jar; never use original-*.jar
+$mainJar    = Get-ChildItem -Path $target -Filter "rf-keywords-rbc-1.0.0.jar" -ErrorAction SilentlyContinue | Select-Object -First 1
+$shadedJar  = Get-ChildItem -Path $target -Filter "rf-keywords-rbc-1.0.0-shaded.jar" -ErrorAction SilentlyContinue | Select-Object -First 1
+$origJar    = Get-ChildItem -Path $target -Filter "original-rf-keywords-rbc-1.0.0.jar" -ErrorAction SilentlyContinue | Select-Object -First 1
 
-          $args = @(
-            "-jar", $jar.FullName,
-            "--host", $bindHost,
-            "--port", $env:RF_PORT
-          )
+if ($origJar) { Write-Host "NOTE: original-*.jar present, will NOT be used." }
 
-          Write-Host ("Starting KeywordServer: {0} on {1}:{2}" -f $jar.FullName, $bindHost, $env:RF_PORT)
+if ($mainJar)       { $jarToRun = $mainJar.FullName }
+elseif ($shadedJar) { $jarToRun = $shadedJar.FullName }
+else { throw "No runnable KeywordServer jar found under $target" }
 
-          # Start detached (no -Wait); WindowStyle Hidden prevents console pop-ups on Windows agents
-          $p = Start-Process -FilePath $java -ArgumentList $args -WorkingDirectory $jarDir -WindowStyle Hidden -PassThru
+Write-Host "Starting KeywordServer: $jarToRun on $bindHost:$port"
 
-          # Persist PID for later cleanup
-          Set-Content -Path (Join-Path $ws "server.pid") -Value $p.Id
+# 3) Launch in background (non-blocking). Pass -D to be explicit alongside env.
+$java = "java"
+$arguments = @(
+  "-Drf.host=$($bindHost)",
+  "-Drf.port=$($port)",
+  "-jar", "$jarToRun"
+)
 
-          # Readiness probe on loopback only (never probe 0.0.0.0)
-          $deadline = (Get-Date).AddMinutes(2)
-          $ok = $false
-          do {
-            try {
-              $ok = Test-NetConnection -ComputerName $probeHost -Port $env:RF_PORT -InformationLevel Quiet
-            } catch {
-              $ok = $false
-            }
-            if (-not $ok) { Start-Sleep -Seconds 2 }
-          } until ($ok -or (Get-Date) -gt $deadline)
+$proc = Start-Process -FilePath $java -ArgumentList $arguments -PassThru -WindowStyle Hidden
+Set-Content -Path "server.pid" -Value $proc.Id
 
-          if (-not $ok) {
-            throw ("KeywordServer not ready on {0}:{1}" -f $probeHost, $env:RF_PORT)
-          }
+# 4) Readiness probe against loopback (works whether server binds 0.0.0.0 or 127.0.0.1)
+$probeHost = "127.0.0.1"
+$tries = 30
+$ok = $false
+for ($i=1; $i -le $tries; $i++) {
+  Start-Sleep -Seconds 1
+  $tcp = Test-NetConnection -ComputerName $probeHost -Port $port -WarningAction SilentlyContinue
+  if ($tcp.TcpTestSucceeded) { $ok = $true; break }
+  Write-Host ("[{0}] WARNING: TCP connect to ({1} : {2}) failed" -f (Get-Date).ToString("s"), $probeHost, $port)
+}
 
-          Write-Host ("KeywordServer is accepting connections on {0}:{1} (PID={2})" -f $probeHost, $env:RF_PORT, $p.Id)
-          # PowerShell step ends here; process stays running in background for next stages
-        '''
+if (-not $ok) {
+  try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+  throw ("KeywordServer not ready on {0}:{1} after {2}s" -f $probeHost, $port, $tries)
+}
+
+Write-Host ("KeywordServer is accepting connections on {0}:{1} (PID={2})" -f $probeHost, $port, $proc.Id)
+'''
       }
     }
 
     stage('Setup Python') {
       steps {
         bat """
-          if not exist "%PYTHON_HOME%\\python.exe" (
-            echo Python not found at %PYTHON_HOME%\\python.exe
-            exit /b 1
-          )
-          set "PATH=%PYTHON_HOME%;%PYTHON_SCRIPTS%;%PATH%"
-          "%PYTHON_SCRIPTS%\\pip.exe" --version
-          "%PYTHON_SCRIPTS%\\pip.exe" install --upgrade pip
-          "%PYTHON_SCRIPTS%\\pip.exe" install --disable-pip-version-check robotframework robotframework-pabot allure-robotframework
-        """
+IF NOT EXIST "${params.PYTHON_EXE}" (
+  echo ERROR: Python not found at "${params.PYTHON_EXE}"
+  exit /b 1
+)
+"${params.PYTHON_EXE}" -m pip install -U pip
+"${params.PYTHON_EXE}" -m pip install robotframework robotframework-pabot allure-robotframework
+"""
       }
     }
 
     stage('Run Robot (pabot)') {
       steps {
         bat """
-          setlocal
-          set "PATH=%PYTHON_HOME%;%PYTHON_SCRIPTS%;%PATH%"
-          if not exist "%ALLURE_RESULTS%" mkdir "%ALLURE_RESULTS%"
-          if not exist "%ROBOT_RESULTS%"  mkdir "%ROBOT_RESULTS%"
+IF NOT EXIST "results\\robot" mkdir "results\\robot"
+IF NOT EXIST "results\\allure" mkdir "results\\allure"
 
-          "%PYTHON_SCRIPTS%\\pabot.exe" ^
-            --no-pabotlib ^
-            --processes %PROCESSES% ^
-            --testlevelsplit ^
-            --listener "allure_robotframework;%ALLURE_RESULTS%" ^
-            --outputdir "%ROBOT_RESULTS%" ^
-            tests\\api_smoke.robot tests\\sql_demo.robot tests\\fix_demo.robot
-
-          endlocal
-        """
+"${params.PYTHON_EXE}" -m pabot ^
+  --processes ${params.PROCESSES} ^
+  --testlevelsplit ^
+  --listener "allure_robotframework;results/allure" ^
+  --outputdir "results/robot" ^
+  tests\\api_smoke.robot tests\\sql_demo.robot tests\\fix_demo.robot
+"""
       }
     }
 
     stage('Publish Allure Report') {
       steps {
-        // Requires the Jenkins Allure Plugin to be installed
+        // Requires Allure Jenkins plugin + configured Allure commandline tool
         allure([
           includeProperties: false,
           jdk: '',
-          reportBuildPolicy: 'ALWAYS',
-          results: [[path: "${env.ALLURE_RESULTS}"]]
+          results: [[path: 'results/allure']]
         ])
       }
     }
@@ -154,26 +144,25 @@ pipeline {
 
   post {
     always {
-      // Archive run artifacts (don’t fail build if empty)
-      archiveArtifacts artifacts: 'results/**/*', allowEmptyArchive: true
-
-      // Robot's output.xml is not JUnit; keep non-fatal
-      junit allowEmptyResults: true, testResults: "${env.ROBOT_RESULTS}/**/*.xml"
-
-      // Best-effort server cleanup
+      // Try to stop server cleanly; then make sure the port is free.
       powershell '''
-        $ws = $env:WORKSPACE
-        $pidFile = Join-Path $ws "server.pid"
-        if (Test-Path $pidFile) {
-          $serverPid = Get-Content $pidFile | Select-Object -First 1
-          if ($serverPid) {
-            try {
-              $proc = Get-Process -Id $serverPid -ErrorAction SilentlyContinue
-              if ($proc) { Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue }
-            } catch { }
-          }
-        }
-      '''
+$ErrorActionPreference = "Continue"
+if (Test-Path "server.pid") {
+  $pid = Get-Content "server.pid" | Select-Object -First 1
+  if ($pid) {
+    try { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } catch {}
+  }
+  Remove-Item "server.pid" -ErrorAction SilentlyContinue
+}
+
+$port = [int]$env:RF_PORT
+$inUse = netstat -ano | Select-String ":$port\\s" | ForEach-Object { ($_ -split "\\s+")[($_ -split "\\s+").Length-1] } | Select-Object -Unique
+foreach ($p in $inUse) {
+  try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } catch {}
+}
+'''
+      archiveArtifacts artifacts: 'results/**', fingerprint: true
+      // Robot output.xml is not JUnit; we skip junit() to avoid false errors
     }
   }
 }
